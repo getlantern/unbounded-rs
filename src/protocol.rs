@@ -103,6 +103,18 @@ pub fn parse_egress_subprotocols(values: &[impl AsRef<str>]) -> Option<(&str, &s
     Some((values[1].as_ref(), values[2].as_ref()))
 }
 
+/// Returns true if `value` is safe to use as a single `Sec-WebSocket-Protocol`
+/// token. The consumer session ID is remote-supplied, so it must not contain the
+/// list separator (`,`) or any whitespace/control/non-visible byte that would
+/// split the comma-delimited header into extra subprotocol tokens. Base64, hex,
+/// and UUID session IDs (`/`, `+`, `=`, `-`, `_`) remain valid.
+pub fn is_subprotocol_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b',')
+}
+
 mod base64_payload {
     use super::*;
     use serde::{Deserializer, Serializer};
@@ -184,5 +196,17 @@ mod tests {
             parse_egress_subprotocols(&values),
             Some(("session-id", "v2.3.0"))
         );
+    }
+
+    #[test]
+    fn subprotocol_token_accepts_ids_but_rejects_list_injection() {
+        assert!(is_subprotocol_token("consumer-session-id"));
+        assert!(is_subprotocol_token("a1B2/c3+d4="));
+        assert!(is_subprotocol_token("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!is_subprotocol_token(""));
+        assert!(!is_subprotocol_token("csid, injected"));
+        assert!(!is_subprotocol_token("has space"));
+        assert!(!is_subprotocol_token("tab\there"));
+        assert!(!is_subprotocol_token("new\nline"));
     }
 }

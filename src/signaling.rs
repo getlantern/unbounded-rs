@@ -31,7 +31,7 @@ pub enum SignalingError {
     RecipientGone,
     #[error("Freddie returned HTTP {0}")]
     Http(u16),
-    #[error("Freddie returned an invalid signaling envelope: {0}")]
+    #[error("invalid signaling JSON: {0}")]
     Decode(#[from] serde_json::Error),
 }
 

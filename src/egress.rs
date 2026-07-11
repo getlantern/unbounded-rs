@@ -9,7 +9,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::protocol::{egress_subprotocols, PROTOCOL_VERSION, SUBPROTOCOL_MAGIC_COOKIE};
+use crate::protocol::{
+    egress_subprotocols, is_subprotocol_token, PROTOCOL_VERSION, SUBPROTOCOL_MAGIC_COOKIE,
+};
 use crate::relay::{BoxTransportError, DatagramTransport};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -30,6 +32,8 @@ pub enum EgressError {
     MissingSubprotocol,
     #[error("egress selected unexpected WebSocket subprotocol {0:?}")]
     UnexpectedSubprotocol(String),
+    #[error("consumer session ID {0:?} is not a valid WebSocket subprotocol token")]
+    InvalidConsumerSessionId(String),
     #[error("egress sent a text message on the binary packet tunnel")]
     TextMessage,
 }
@@ -49,6 +53,9 @@ impl EgressTunnel {
         csid: &str,
         connect_timeout: Duration,
     ) -> Result<Self, EgressError> {
+        if !is_subprotocol_token(csid) {
+            return Err(EgressError::InvalidConsumerSessionId(csid.to_owned()));
+        }
         let mut request = url.into_client_request().map_err(EgressError::Request)?;
         let protocols = egress_subprotocols(csid, PROTOCOL_VERSION).join(", ");
         request
@@ -193,5 +200,15 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, EgressError::ConnectTimeout(value) if value == timeout));
         stalled_server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_a_consumer_session_id_that_would_inject_subprotocols() {
+        let error = EgressTunnel::connect("ws://127.0.0.1:1/ws", "csid, un80und3d")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, EgressError::InvalidConsumerSessionId(value) if value == "csid, un80und3d")
+        );
     }
 }
