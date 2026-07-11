@@ -20,7 +20,7 @@ pub const DATA_CHANNEL_LABEL: &str = "data";
 pub const DEFAULT_DATA_CHANNEL_QUEUE: usize = 4096;
 
 pub fn build_api() -> Result<API, webrtc::Error> {
-    build_api_with_options(true, true)
+    build_api_with_options(false, true)
 }
 
 pub fn build_api_with_ipv6(enable_ipv6: bool) -> Result<API, webrtc::Error> {

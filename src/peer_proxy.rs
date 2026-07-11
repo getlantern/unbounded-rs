@@ -112,9 +112,9 @@ struct PionIceCandidate {
     #[serde(rename = "tcpType")]
     tcp_type: String,
     #[serde(rename = "sdpMid", default)]
-    sdp_mid: String,
+    sdp_mid: Option<String>,
     #[serde(rename = "sdpMLineIndex", default)]
-    sdp_mline_index: u16,
+    sdp_mline_index: Option<u16>,
 }
 
 impl PionIceCandidate {
@@ -243,8 +243,8 @@ pub async fn run_peer_proxy_until_cancelled(
                 .to_rust_candidate()
                 .to_json()
                 .map_err(PeerProxyError::InvalidIceCandidate)?;
-            init.sdp_mid = Some(candidate.sdp_mid.clone());
-            init.sdp_mline_index = Some(candidate.sdp_mline_index);
+            init.sdp_mid = candidate.sdp_mid.clone();
+            init.sdp_mline_index = candidate.sdp_mline_index;
             connection.add_ice_candidate(init).await?;
         }
 
@@ -351,13 +351,36 @@ mod tests {
         }"#;
         let candidate: PionIceCandidate = serde_json::from_str(raw).unwrap();
         let mut init = candidate.to_rust_candidate().to_json().unwrap();
-        init.sdp_mid = Some(candidate.sdp_mid.clone());
-        init.sdp_mline_index = Some(candidate.sdp_mline_index);
+        init.sdp_mid = candidate.sdp_mid.clone();
+        init.sdp_mline_index = candidate.sdp_mline_index;
 
         assert!(init.candidate.starts_with("candidate:1234 1 udp"));
         assert!(init.candidate.contains("203.0.113.8 54321 typ srflx"));
         assert_eq!(init.sdp_mid.as_deref(), Some("0"));
         assert_eq!(init.sdp_mline_index, Some(0));
+    }
+
+    #[test]
+    fn preserves_absent_pion_candidate_metadata() {
+        let raw = r#"{
+            "foundation":"1234",
+            "priority":1694498815,
+            "address":"203.0.113.8",
+            "protocol":1,
+            "port":54321,
+            "type":"host",
+            "component":1,
+            "relatedAddress":"",
+            "relatedPort":0,
+            "tcpType":""
+        }"#;
+        let candidate: PionIceCandidate = serde_json::from_str(raw).unwrap();
+        let mut init = candidate.to_rust_candidate().to_json().unwrap();
+        init.sdp_mid = candidate.sdp_mid.clone();
+        init.sdp_mline_index = candidate.sdp_mline_index;
+
+        assert_eq!(init.sdp_mid, None);
+        assert_eq!(init.sdp_mline_index, None);
     }
 
     #[test]

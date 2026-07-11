@@ -146,7 +146,7 @@ where
         let result = run_session(config.peer_proxy.clone(), cancellation.child_token()).await;
         let duration = started.elapsed();
 
-        if matches!(result, Err(PeerProxyError::Cancelled)) && cancellation.is_cancelled() {
+        if result.is_err() && cancellation.is_cancelled() {
             break;
         }
 
@@ -312,6 +312,25 @@ mod tests {
 
         assert_eq!(summary.attempts, 3);
         assert_eq!(summary.failed_attempts, 2);
+        assert_eq!(summary.completed_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_race_does_not_count_a_transport_failure() {
+        let cancellation = CancellationToken::new();
+        let summary = supervise_with(test_config(), cancellation.clone(), None, {
+            move |_, _| {
+                let cancellation = cancellation.clone();
+                async move {
+                    cancellation.cancel();
+                    Err(PeerProxyError::MissingResponse("shutdown race"))
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(summary.attempts, 1);
+        assert_eq!(summary.failed_attempts, 0);
         assert_eq!(summary.completed_sessions, 0);
     }
 

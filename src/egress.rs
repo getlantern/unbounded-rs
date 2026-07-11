@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
@@ -13,6 +14,8 @@ use crate::relay::{BoxTransportError, DatagramTransport};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+pub const DEFAULT_EGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, thiserror::Error)]
 pub enum EgressError {
     #[error("invalid egress WebSocket request: {0}")]
@@ -21,6 +24,8 @@ pub enum EgressError {
     Header(#[from] tungstenite::http::header::InvalidHeaderValue),
     #[error("egress WebSocket failed: {0}")]
     WebSocket(#[from] tungstenite::Error),
+    #[error("timed out after {0:?} connecting to the egress WebSocket")]
+    ConnectTimeout(Duration),
     #[error("egress selected no WebSocket subprotocol")]
     MissingSubprotocol,
     #[error("egress selected unexpected WebSocket subprotocol {0:?}")]
@@ -36,13 +41,24 @@ pub struct EgressTunnel {
 
 impl EgressTunnel {
     pub async fn connect(url: &str, csid: &str) -> Result<Self, EgressError> {
+        Self::connect_with_timeout(url, csid, DEFAULT_EGRESS_CONNECT_TIMEOUT).await
+    }
+
+    async fn connect_with_timeout(
+        url: &str,
+        csid: &str,
+        connect_timeout: Duration,
+    ) -> Result<Self, EgressError> {
         let mut request = url.into_client_request().map_err(EgressError::Request)?;
         let protocols = egress_subprotocols(csid, PROTOCOL_VERSION).join(", ");
         request
             .headers_mut()
             .insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_str(&protocols)?);
 
-        let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+        let (socket, response) =
+            tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(request))
+                .await
+                .map_err(|_| EgressError::ConnectTimeout(connect_timeout))??;
         let selected = response
             .headers()
             .get(SEC_WEBSOCKET_PROTOCOL)
@@ -160,5 +176,22 @@ mod tests {
             Some(Bytes::from_static(b"opaque QUIC packet"))
         );
         assert_eq!(tunnel.recv().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn times_out_a_stalled_egress_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let stalled_server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let timeout = Duration::from_millis(20);
+        let error = EgressTunnel::connect_with_timeout(&url, "consumer-session-id", timeout)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EgressError::ConnectTimeout(value) if value == timeout));
+        stalled_server.abort();
     }
 }
