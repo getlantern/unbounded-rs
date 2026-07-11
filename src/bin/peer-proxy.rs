@@ -1,7 +1,9 @@
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lantern_unbounded::peer_proxy::PeerProxyConfig;
+use lantern_unbounded::signaling::FreddieClient;
 use lantern_unbounded::supervisor::{
     supervise_peer_proxy_pool, PoolEvent, SupervisorConfig, SupervisorEvent,
 };
@@ -81,10 +83,14 @@ async fn main() {
     });
 
     let slots = count("UNBOUNDED_CONCURRENT_SESSIONS", 5);
+    let signaler = Arc::new(
+        FreddieClient::new(required("UNBOUNDED_FREDDIE_ENDPOINT"))
+            .unwrap_or_else(|error| panic!("invalid Freddie configuration: {error}")),
+    );
     let summary = supervise_peer_proxy_pool(
         SupervisorConfig {
             peer_proxy: PeerProxyConfig {
-                freddie_endpoint: required("UNBOUNDED_FREDDIE_ENDPOINT"),
+                signaler,
                 egress_url: required("UNBOUNDED_EGRESS_URL"),
                 stun_urls,
                 nat_timeout: seconds("UNBOUNDED_NAT_TIMEOUT_SECONDS", 10),

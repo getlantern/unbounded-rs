@@ -1,12 +1,21 @@
+use std::fmt::Debug;
+
+use async_trait::async_trait;
+#[cfg(feature = "reqwest-client")]
 use reqwest::{Client, StatusCode, Url};
+#[cfg(feature = "reqwest-client")]
 use serde::Serialize;
 
-use crate::protocol::{SignalMessage, SignalMessageType, PROTOCOL_VERSION, VERSION_HEADER};
+use crate::protocol::{SignalMessage, SignalMessageType};
+#[cfg(feature = "reqwest-client")]
+use crate::protocol::{PROTOCOL_VERSION, VERSION_HEADER};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignalingError {
+    #[cfg(feature = "reqwest-client")]
     #[error("invalid Freddie endpoint: {0}")]
     InvalidEndpoint(#[from] url::ParseError),
+    #[cfg(feature = "reqwest-client")]
     #[error("Freddie request failed: {0}")]
     Transport(#[from] reqwest::Error),
     #[error("Freddie rejected protocol version {0}")]
@@ -14,11 +23,22 @@ pub enum SignalingError {
     #[error("Freddie signaling recipient is no longer available")]
     RecipientGone,
     #[error("Freddie returned HTTP {0}")]
-    Http(StatusCode),
+    Http(u16),
     #[error("Freddie returned an invalid signaling envelope: {0}")]
     Decode(#[from] serde_json::Error),
 }
 
+#[async_trait]
+pub trait Signaler: Send + Sync + Debug {
+    async fn exchange(
+        &self,
+        send_to: &str,
+        kind: SignalMessageType,
+        payload: &str,
+    ) -> Result<Option<SignalMessage>, SignalingError>;
+}
+
+#[cfg(feature = "reqwest-client")]
 #[derive(Debug, Clone)]
 pub struct FreddieClient {
     client: Client,
@@ -26,12 +46,14 @@ pub struct FreddieClient {
     version: String,
 }
 
+#[cfg(feature = "reqwest-client")]
 #[derive(Debug)]
 pub struct AdvertisementStream {
     response: reqwest::Response,
     buffered: Vec<u8>,
 }
 
+#[cfg(feature = "reqwest-client")]
 impl FreddieClient {
     pub fn new(endpoint: impl AsRef<str>) -> Result<Self, SignalingError> {
         Self::with_client(Client::new(), endpoint, PROTOCOL_VERSION)
@@ -86,7 +108,7 @@ impl FreddieClient {
                 return Err(SignalingError::ProtocolVersion(self.version.clone()))
             }
             StatusCode::NOT_FOUND => return Err(SignalingError::RecipientGone),
-            status => return Err(SignalingError::Http(status)),
+            status => return Err(SignalingError::Http(status.as_u16())),
         }
 
         let body = response.bytes().await?;
@@ -109,11 +131,25 @@ impl FreddieClient {
                 buffered: Vec::new(),
             }),
             StatusCode::IM_A_TEAPOT => Err(SignalingError::ProtocolVersion(self.version.clone())),
-            status => Err(SignalingError::Http(status)),
+            status => Err(SignalingError::Http(status.as_u16())),
         }
     }
 }
 
+#[cfg(feature = "reqwest-client")]
+#[async_trait]
+impl Signaler for FreddieClient {
+    async fn exchange(
+        &self,
+        send_to: &str,
+        kind: SignalMessageType,
+        payload: &str,
+    ) -> Result<Option<SignalMessage>, SignalingError> {
+        FreddieClient::exchange(self, send_to, kind, payload).await
+    }
+}
+
+#[cfg(feature = "reqwest-client")]
 impl AdvertisementStream {
     pub async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
         loop {
@@ -138,7 +174,7 @@ impl AdvertisementStream {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "reqwest-client"))]
 mod tests {
     use std::collections::HashMap;
 

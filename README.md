@@ -58,6 +58,17 @@ Cancellation closes every active WebRTC peer connection before the pool exits.
 Third-party logs default to `error` to avoid exposing ICE candidate addresses;
 operators can opt into more detail with `RUST_LOG`.
 
+Embedders that already own an HTTP stack can exclude the native CLI and its
+`reqwest`/`env_logger` dependencies, then supply Freddie signaling through the
+object-safe `Signaler` trait:
+
+```toml
+lantern-unbounded = { version = "0.1", default-features = false }
+```
+
+The default `native-client` feature retains the standalone `peer-proxy` binary
+and the `FreddieClient` implementation used by the command above.
+
 DTLS ClientHello randomization is enabled by default. Cipher suites and
 extensions retain their negotiated contents but are independently reordered on
 each ClientHello flight, preventing the stable library-default fingerprint that

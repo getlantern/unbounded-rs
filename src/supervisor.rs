@@ -242,10 +242,26 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
+    struct TestSignaler;
+
+    #[async_trait::async_trait]
+    impl crate::signaling::Signaler for TestSignaler {
+        async fn exchange(
+            &self,
+            _send_to: &str,
+            _kind: crate::protocol::SignalMessageType,
+            _payload: &str,
+        ) -> Result<Option<crate::protocol::SignalMessage>, crate::signaling::SignalingError>
+        {
+            Ok(None)
+        }
+    }
+
     fn test_config() -> SupervisorConfig {
         SupervisorConfig {
             peer_proxy: PeerProxyConfig {
-                freddie_endpoint: "http://127.0.0.1:1/v1/signal".into(),
+                signaler: Arc::new(TestSignaler),
                 egress_url: "ws://127.0.0.1:1/ws".into(),
                 stun_urls: Vec::new(),
                 nat_timeout: Duration::from_millis(1),

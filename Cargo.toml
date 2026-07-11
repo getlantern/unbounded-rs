@@ -6,14 +6,19 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Rust implementation of the native Unbounded peer-proxy protocol"
 
+[features]
+default = ["native-client"]
+native-client = ["reqwest-client", "dep:env_logger"]
+reqwest-client = ["dep:reqwest", "dep:url"]
+
 [dependencies]
 base64 = "0.22"
 async-trait = "0.1"
 bytes = "1"
-env_logger = "0.11"
+env_logger = { version = "0.11", optional = true }
 futures-util = "0.3"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["http2", "rustls-tls-webpki-roots"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_repr = "0.1"
@@ -22,8 +27,13 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
-url = "2"
+url = { version = "2", optional = true }
 webrtc = { git = "https://github.com/myleshorton/webrtc", rev = "a6a6d703037ca277df030ec7f882965c9da14577" }
+
+[[bin]]
+name = "peer-proxy"
+path = "src/bin/peer-proxy.rs"
+required-features = ["native-client"]
 
 [dev-dependencies]
 futures = "0.3"

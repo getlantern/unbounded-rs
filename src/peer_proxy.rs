@@ -15,11 +15,11 @@ use crate::egress::{EgressError, EgressTunnel};
 use crate::protocol::{GenesisMessage, PathAssertion, SignalMessageType};
 use crate::relay::{relay, RelayEnd, RelayError};
 use crate::rtc::{build_api_with_options, WebRtcDatagrams, DATA_CHANNEL_LABEL};
-use crate::signaling::{FreddieClient, SignalingError};
+use crate::signaling::{Signaler, SignalingError};
 
 #[derive(Debug, Clone)]
 pub struct PeerProxyConfig {
-    pub freddie_endpoint: String,
+    pub signaler: Arc<dyn Signaler>,
     pub egress_url: String,
     pub stun_urls: Vec<String>,
     pub nat_timeout: Duration,
@@ -141,7 +141,6 @@ pub async fn run_peer_proxy_until_cancelled(
     config: PeerProxyConfig,
     cancellation: CancellationToken,
 ) -> Result<PeerProxyOutcome, PeerProxyError> {
-    let freddie = FreddieClient::new(&config.freddie_endpoint)?;
     let api = build_api_with_options(config.enable_ipv6, config.randomize_dtls)?;
     let ice_servers = if config.stun_urls.is_empty() {
         Vec::new()
@@ -178,14 +177,13 @@ pub async fn run_peer_proxy_until_cancelled(
     }));
 
     let session = async {
-        let offer_signal = freddie
-            .exchange_json(
-                "genesis",
-                SignalMessageType::Genesis,
-                &GenesisMessage {
-                    path_assertion: PathAssertion::all_hosts_on_request(),
-                },
-            )
+        let genesis = serde_json::to_string(&GenesisMessage {
+            path_assertion: PathAssertion::all_hosts_on_request(),
+        })
+        .map_err(SignalingError::Decode)?;
+        let offer_signal = config
+            .signaler
+            .exchange("genesis", SignalMessageType::Genesis, &genesis)
             .await?
             .ok_or(PeerProxyError::MissingResponse("offer"))?;
         expect_signal(&offer_signal, SignalMessageType::Offer)?;
@@ -207,8 +205,10 @@ pub async fn run_peer_proxy_until_cancelled(
             .await
             .ok_or(PeerProxyError::MissingResponse("local ICE gathering"))?;
 
-        let ice_signal = freddie
-            .exchange_json(
+        let final_answer = serde_json::to_string(&final_answer).map_err(SignalingError::Decode)?;
+        let ice_signal = config
+            .signaler
+            .exchange(
                 &offer_signal.reply_to,
                 SignalMessageType::Answer,
                 &final_answer,
@@ -293,11 +293,16 @@ fn expect_signal(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "reqwest-client")]
     use axum::http::StatusCode;
+    #[cfg(feature = "reqwest-client")]
     use axum::routing::post;
+    #[cfg(feature = "reqwest-client")]
     use axum::Router;
 
     use super::*;
+    #[cfg(feature = "reqwest-client")]
+    use crate::signaling::FreddieClient;
 
     #[test]
     fn decodes_pion_candidate_and_builds_rust_candidate_init() {
@@ -340,6 +345,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "reqwest-client")]
     async fn cancellation_interrupts_signaling_and_closes_the_session() {
         let (request_tx, request_rx) = oneshot::channel();
         let request_tx = Arc::new(Mutex::new(Some(request_tx)));
@@ -363,7 +369,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let session = tokio::spawn(run_peer_proxy_until_cancelled(
             PeerProxyConfig {
-                freddie_endpoint: endpoint,
+                signaler: Arc::new(FreddieClient::new(endpoint).unwrap()),
                 egress_url: "ws://127.0.0.1:1/ws".into(),
                 stun_urls: Vec::new(),
                 nat_timeout: Duration::from_secs(1),
