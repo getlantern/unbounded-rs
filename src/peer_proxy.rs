@@ -9,6 +9,7 @@ use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_protocol::RTCIceProtocol;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::egress::{EgressError, EgressTunnel};
@@ -16,6 +17,9 @@ use crate::protocol::{GenesisMessage, PathAssertion, SignalMessageType};
 use crate::relay::{relay, RelayEnd, RelayError};
 use crate::rtc::{build_api_with_options, WebRtcDatagrams, DATA_CHANNEL_LABEL};
 use crate::signaling::{Signaler, SignalingError};
+
+type DataChannelWaitSender<T> =
+    Arc<Mutex<Option<oneshot::Sender<Result<T, RTCPeerConnectionState>>>>>;
 
 #[derive(Debug, Clone)]
 pub struct PeerProxyConfig {
@@ -59,8 +63,10 @@ pub enum PeerProxyError {
     InvalidIceCandidate(#[source] webrtc::Error),
     #[error("timed out waiting for the consumer WebRTC DataChannel")]
     NatTimeout,
-    #[error("consumer WebRTC connection closed before opening a DataChannel")]
+    #[error("consumer WebRTC DataChannel callback ended before opening the channel")]
     DataChannelClosed,
+    #[error("consumer WebRTC connection became {0} before opening a DataChannel")]
+    PeerConnectionEnded(RTCPeerConnectionState),
     #[error("egress tunnel failed: {0}")]
     Egress(#[from] EgressError),
     #[error("packet relay failed after {relay_duration:?}: {source}")]
@@ -160,6 +166,11 @@ pub async fn run_peer_proxy_until_cancelled(
 
     let (data_channel_tx, data_channel_rx) = oneshot::channel();
     let data_channel_tx = Arc::new(Mutex::new(Some(data_channel_tx)));
+    let state_data_channel_tx = data_channel_tx.clone();
+    connection.on_peer_connection_state_change(Box::new(move |state| {
+        fail_data_channel_wait(state, &state_data_channel_tx);
+        Box::pin(async {})
+    }));
     connection.on_data_channel(Box::new(move |channel| {
         if channel.label() == DATA_CHANNEL_LABEL {
             let datagrams = Arc::new(Mutex::new(Some(WebRtcDatagrams::new(channel.clone()))));
@@ -168,7 +179,7 @@ pub async fn run_peer_proxy_until_cancelled(
                 let tx = data_channel_tx.lock().unwrap().take();
                 let datagrams = datagrams.lock().unwrap().take();
                 if let (Some(tx), Some(datagrams)) = (tx, datagrams) {
-                    let _ = tx.send(datagrams);
+                    let _ = tx.send(Ok(datagrams));
                 }
                 Box::pin(async {})
             }));
@@ -240,7 +251,8 @@ pub async fn run_peer_proxy_until_cancelled(
         let mut peer = tokio::time::timeout(config.nat_timeout, data_channel_rx)
             .await
             .map_err(|_| PeerProxyError::NatTimeout)?
-            .map_err(|_| PeerProxyError::DataChannelClosed)?;
+            .map_err(|_| PeerProxyError::DataChannelClosed)?
+            .map_err(PeerProxyError::PeerConnectionEnded)?;
         let mut egress =
             EgressTunnel::connect(&config.egress_url, &ice.consumer_session_id).await?;
         let relay_started = tokio::time::Instant::now();
@@ -266,6 +278,23 @@ pub async fn run_peer_proxy_until_cancelled(
 
     let _ = connection.close().await;
     result
+}
+
+fn is_terminal_peer_state(state: RTCPeerConnectionState) -> bool {
+    matches!(
+        state,
+        RTCPeerConnectionState::Disconnected
+            | RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Closed
+    )
+}
+
+fn fail_data_channel_wait<T>(state: RTCPeerConnectionState, sender: &DataChannelWaitSender<T>) {
+    if is_terminal_peer_state(state) {
+        if let Some(tx) = sender.lock().unwrap().take() {
+            let _ = tx.send(Err(state));
+        }
+    }
 }
 
 impl PeerProxyError {
@@ -329,6 +358,24 @@ mod tests {
         assert!(init.candidate.contains("203.0.113.8 54321 typ srflx"));
         assert_eq!(init.sdp_mid.as_deref(), Some("0"));
         assert_eq!(init.sdp_mline_index, Some(0));
+    }
+
+    #[test]
+    fn identifies_terminal_peer_states() {
+        assert!(is_terminal_peer_state(RTCPeerConnectionState::Disconnected));
+        assert!(is_terminal_peer_state(RTCPeerConnectionState::Failed));
+        assert!(is_terminal_peer_state(RTCPeerConnectionState::Closed));
+        assert!(!is_terminal_peer_state(RTCPeerConnectionState::New));
+        assert!(!is_terminal_peer_state(RTCPeerConnectionState::Connecting));
+        assert!(!is_terminal_peer_state(RTCPeerConnectionState::Connected));
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_state_wakes_data_channel_wait() {
+        let (tx, rx) = oneshot::channel::<Result<(), RTCPeerConnectionState>>();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        fail_data_channel_wait(RTCPeerConnectionState::Failed, &tx);
+        assert_eq!(rx.await.unwrap(), Err(RTCPeerConnectionState::Failed));
     }
 
     #[test]

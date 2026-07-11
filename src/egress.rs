@@ -67,7 +67,7 @@ impl EgressTunnel {
             };
             match message? {
                 Message::Binary(packet) => return Ok(Some(packet)),
-                Message::Ping(payload) => self.socket.send(Message::Pong(payload)).await?,
+                Message::Ping(_) => {}
                 Message::Pong(_) => {}
                 Message::Close(_) => return Ok(None),
                 Message::Text(_) => return Err(EgressError::TextMessage),

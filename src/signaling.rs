@@ -1,4 +1,6 @@
 use std::fmt::Debug;
+#[cfg(feature = "reqwest-client")]
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "reqwest-client")]
@@ -10,11 +12,17 @@ use crate::protocol::{SignalMessage, SignalMessageType};
 #[cfg(feature = "reqwest-client")]
 use crate::protocol::{PROTOCOL_VERSION, VERSION_HEADER};
 
+#[cfg(feature = "reqwest-client")]
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, thiserror::Error)]
 pub enum SignalingError {
     #[cfg(feature = "reqwest-client")]
     #[error("invalid Freddie endpoint: {0}")]
     InvalidEndpoint(#[from] url::ParseError),
+    #[cfg(feature = "reqwest-client")]
+    #[error("Freddie request failed: {0}")]
+    NativeTransport(#[from] reqwest::Error),
     #[error("Freddie request failed: {0}")]
     Transport(String),
     #[error("Freddie rejected protocol version {0}")]
@@ -55,7 +63,10 @@ pub struct AdvertisementStream {
 #[cfg(feature = "reqwest-client")]
 impl FreddieClient {
     pub fn new(endpoint: impl AsRef<str>) -> Result<Self, SignalingError> {
-        Self::with_client(Client::new(), endpoint, PROTOCOL_VERSION)
+        let client = Client::builder()
+            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+            .build()?;
+        Self::with_client(client, endpoint, PROTOCOL_VERSION)
     }
 
     pub fn with_client(
@@ -99,8 +110,7 @@ impl FreddieClient {
                 ("type", &(kind as u8).to_string()),
             ])
             .send()
-            .await
-            .map_err(|error| SignalingError::Transport(error.to_string()))?;
+            .await?;
 
         match response.status() {
             StatusCode::OK => {}
@@ -111,10 +121,7 @@ impl FreddieClient {
             status => return Err(SignalingError::Http(status.as_u16())),
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| SignalingError::Transport(error.to_string()))?;
+        let body = response.bytes().await?;
         if body.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);
         }
@@ -127,8 +134,7 @@ impl FreddieClient {
             .get(self.endpoint.clone())
             .header(VERSION_HEADER, &self.version)
             .send()
-            .await
-            .map_err(|error| SignalingError::Transport(error.to_string()))?;
+            .await?;
         match response.status() {
             StatusCode::OK => Ok(AdvertisementStream {
                 response,
@@ -166,12 +172,7 @@ impl AdvertisementStream {
                 return Ok(Some(serde_json::from_slice(&line)?));
             }
 
-            match self
-                .response
-                .chunk()
-                .await
-                .map_err(|error| SignalingError::Transport(error.to_string()))?
-            {
+            match self.response.chunk().await? {
                 Some(chunk) => self.buffered.extend_from_slice(&chunk),
                 None if self.buffered.iter().all(u8::is_ascii_whitespace) => return Ok(None),
                 None => {
@@ -287,6 +288,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SignalingError::RecipientGone));
+    }
+
+    #[tokio::test]
+    async fn preserves_native_transport_error_type() {
+        let error = FreddieClient::new("http://127.0.0.1:0/v1/signal")
+            .unwrap()
+            .exchange("genesis", SignalMessageType::Genesis, "{}")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SignalingError::NativeTransport(_)));
     }
 
     #[tokio::test]

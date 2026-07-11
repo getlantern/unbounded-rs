@@ -31,7 +31,21 @@ fn count(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-#[tokio::main(flavor = "current_thread")]
+fn boolean(name: &str, default: bool) -> bool {
+    env::var(name)
+        .map(|value| parse_boolean(&value, default))
+        .unwrap_or(default)
+}
+
+fn parse_boolean(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "enable" | "enabled" | "randomize" => true,
+        "0" | "false" | "no" | "off" | "disable" | "disabled" => false,
+        _ => default,
+    }
+}
+
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
         .try_init();
@@ -94,10 +108,8 @@ async fn main() {
                 egress_url: required("UNBOUNDED_EGRESS_URL"),
                 stun_urls,
                 nat_timeout: seconds("UNBOUNDED_NAT_TIMEOUT_SECONDS", 10),
-                enable_ipv6: env::var("UNBOUNDED_ENABLE_IPV6").is_ok_and(|value| value == "1"),
-                randomize_dtls: env::var("UNBOUNDED_COVERT_DTLS")
-                    .map(|value| !value.eq_ignore_ascii_case("disable"))
-                    .unwrap_or(true),
+                enable_ipv6: boolean("UNBOUNDED_ENABLE_IPV6", false),
+                randomize_dtls: boolean("UNBOUNDED_COVERT_DTLS", true),
             },
             initial_backoff: seconds("UNBOUNDED_RETRY_INITIAL_SECONDS", 1),
             max_backoff: seconds("UNBOUNDED_RETRY_MAX_SECONDS", 30),
@@ -115,4 +127,21 @@ async fn main() {
         summary.completed_sessions(),
         summary.failed_attempts()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_boolean;
+
+    #[test]
+    fn parses_boolean_aliases_and_preserves_default_for_unknown_values() {
+        for value in ["1", "true", "YES", "on", "enable", "randomize"] {
+            assert!(parse_boolean(value, false), "{value}");
+        }
+        for value in ["0", "false", "NO", "off", "disable", "disabled"] {
+            assert!(!parse_boolean(value, true), "{value}");
+        }
+        assert!(parse_boolean("unexpected", true));
+        assert!(!parse_boolean("unexpected", false));
+    }
 }
