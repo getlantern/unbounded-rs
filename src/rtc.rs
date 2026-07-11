@@ -107,7 +107,15 @@ impl WebRtcDatagrams {
         channel.on_close(Box::new(move || {
             let events_tx = events_tx.clone();
             Box::pin(async move {
-                let _ = events_tx.send(ChannelEvent::Closed).await;
+                // The close signal must be delivered — dropping it would leave the relay
+                // blocked in recv() until the egress side errors. But awaiting a full queue
+                // here would hold the WebRTC/SCTP callback until the relay drains, so take
+                // the non-blocking path first and only detach the send when the queue is full.
+                if events_tx.try_send(ChannelEvent::Closed).is_err() {
+                    tokio::spawn(async move {
+                        let _ = events_tx.send(ChannelEvent::Closed).await;
+                    });
+                }
             })
         }));
         Self { channel, events }

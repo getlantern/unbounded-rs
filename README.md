@@ -49,7 +49,7 @@ Operational settings are environment variables:
 | `UNBOUNDED_RETRY_INITIAL_SECONDS` | 1 | Initial retry delay |
 | `UNBOUNDED_RETRY_MAX_SECONDS` | 30 | Maximum retry delay, including jitter |
 | `UNBOUNDED_STABLE_SESSION_SECONDS` | 30 | Session duration that resets retry backoff |
-| `UNBOUNDED_COVERT_DTLS` | `randomize` | Truthy/`randomize` enables randomization; falsey/`disable` is diagnostic-only |
+| `UNBOUNDED_COVERT_DTLS` | unset (randomize) | Unset randomizes; truthy/`randomize` keeps it on, falsey/`disable` is diagnostic-only |
 | `UNBOUNDED_ENABLE_IPV6` | unset | Set to `1`, `true`, `yes`, or `on` to gather IPv6 ICE candidates |
 
 Library embedders can consume slot-tagged `PoolEvent` and `SupervisorEvent`
