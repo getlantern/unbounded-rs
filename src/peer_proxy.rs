@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_protocol::RTCIceProtocol;
@@ -62,6 +63,8 @@ pub enum PeerProxyError {
     Egress(#[from] EgressError),
     #[error("packet relay failed: {0}")]
     Relay(#[from] RelayError),
+    #[error("peer proxy session cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +128,13 @@ impl PionIceCandidate {
 }
 
 pub async fn run_peer_proxy(config: PeerProxyConfig) -> Result<PeerProxyOutcome, PeerProxyError> {
+    run_peer_proxy_until_cancelled(config, CancellationToken::new()).await
+}
+
+pub async fn run_peer_proxy_until_cancelled(
+    config: PeerProxyConfig,
+    cancellation: CancellationToken,
+) -> Result<PeerProxyOutcome, PeerProxyError> {
     let freddie = FreddieClient::new(&config.freddie_endpoint)?;
     let api = build_api_with_ipv6(config.enable_ipv6)?;
     let ice_servers = if config.stun_urls.is_empty() {
@@ -161,7 +171,7 @@ pub async fn run_peer_proxy(config: PeerProxyConfig) -> Result<PeerProxyOutcome,
         Box::pin(async {})
     }));
 
-    let result = async {
+    let session = async {
         let offer_signal = freddie
             .exchange_json(
                 "genesis",
@@ -232,8 +242,13 @@ pub async fn run_peer_proxy(config: PeerProxyConfig) -> Result<PeerProxyOutcome,
             consumer_session_id: ice.consumer_session_id,
             relay_end,
         })
-    }
-    .await;
+    };
+
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(PeerProxyError::Cancelled),
+        result = session => result,
+    };
 
     let _ = connection.close().await;
     result
@@ -255,6 +270,10 @@ fn expect_signal(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::Router;
+
     use super::*;
 
     #[test]
@@ -295,5 +314,50 @@ mod tests {
             expect_signal(&signal, SignalMessageType::Offer),
             Err(PeerProxyError::UnexpectedSignal { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_signaling_and_closes_the_session() {
+        let (request_tx, request_rx) = oneshot::channel();
+        let request_tx = Arc::new(Mutex::new(Some(request_tx)));
+        let app = Router::new().route(
+            "/v1/signal",
+            post(move || {
+                let request_tx = request_tx.clone();
+                async move {
+                    if let Some(tx) = request_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    std::future::pending::<()>().await;
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/signal", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let cancellation = CancellationToken::new();
+        let session = tokio::spawn(run_peer_proxy_until_cancelled(
+            PeerProxyConfig {
+                freddie_endpoint: endpoint,
+                egress_url: "ws://127.0.0.1:1/ws".into(),
+                stun_urls: Vec::new(),
+                nat_timeout: Duration::from_secs(1),
+                enable_ipv6: false,
+            },
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(2), request_rx)
+            .await
+            .expect("Freddie request was not started")
+            .unwrap();
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("cancelled session did not stop")
+            .unwrap();
+        assert!(matches!(result, Err(PeerProxyError::Cancelled)));
     }
 }

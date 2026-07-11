@@ -32,3 +32,19 @@ the open stream resumed over peer B within the existing QUIC idle timeout.
   session ID, and `v2.3.0`.
 - IPv4-only ICE is the safe peer-proxy default. Link-local IPv6 interfaces on
   macOS can produce candidates that pass signaling but never nominate.
+
+## Process lifecycle
+
+The Go producer treats each sharing slot as a resetting state machine. The Rust
+supervisor preserves that behavior: signaling errors, NAT timeouts, relay
+closure, and egress failures all return the slot to discovery. Retries use
+bounded exponential backoff with jitter, and a session that remains active for
+the configured stable interval resets the backoff.
+
+The process runs five independent slots by default, matching the Go widget's
+consumer table size. Each slot owns its WebRTC and egress lifecycles; only the
+shutdown token and event sink are shared.
+
+Cancellation is distinct from failure. It interrupts signaling, NAT traversal,
+an active relay, or a retry delay; closes the current WebRTC peer connection;
+and exits without incrementing the failed-attempt count.

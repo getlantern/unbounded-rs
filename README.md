@@ -29,8 +29,9 @@ relay. See [`docs/wire-protocol.md`](docs/wire-protocol.md).
 cargo test
 ```
 
-The diagnostic native peer proxy runs one sharing session using environment
-configuration:
+The native peer proxy runs continuously, returning to Freddie discovery after
+each completed or failed sharing session. It shuts down cleanly on Ctrl-C and
+uses bounded exponential backoff with ±20% jitter between attempts:
 
 ```sh
 UNBOUNDED_FREDDIE_ENDPOINT=http://localhost:9000/v1/signal \
@@ -38,6 +39,21 @@ UNBOUNDED_EGRESS_URL=ws://localhost:8000/ws \
 UNBOUNDED_STUN_URLS=stun:stun.example.org:3478 \
 cargo run --bin peer-proxy
 ```
+
+Operational settings are environment variables:
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `UNBOUNDED_CONCURRENT_SESSIONS` | 5 | Independent consumer slots, matching the Go widget default |
+| `UNBOUNDED_NAT_TIMEOUT_SECONDS` | 10 | Time allowed for the WebRTC DataChannel to open |
+| `UNBOUNDED_RETRY_INITIAL_SECONDS` | 1 | Initial retry delay |
+| `UNBOUNDED_RETRY_MAX_SECONDS` | 30 | Maximum retry delay, including jitter |
+| `UNBOUNDED_STABLE_SESSION_SECONDS` | 30 | Session duration that resets retry backoff |
+| `UNBOUNDED_ENABLE_IPV6` | unset | Set to `1` to gather IPv6 ICE candidates |
+
+Library embedders can consume slot-tagged `PoolEvent` and `SupervisorEvent`
+values for attempt, session, failure, backoff, and shutdown reporting.
+Cancellation closes every active WebRTC peer connection before the pool exits.
 
 The peer proxy uses IPv4 ICE candidates by default. This avoids advertising
 unroutable link-local IPv6 candidates on hosts such as macOS. Set
