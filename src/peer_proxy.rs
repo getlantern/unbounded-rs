@@ -14,7 +14,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::egress::{EgressError, EgressTunnel};
 use crate::protocol::{GenesisMessage, PathAssertion, SignalMessageType};
 use crate::relay::{relay, RelayEnd, RelayError};
-use crate::rtc::{build_api_with_ipv6, WebRtcDatagrams, DATA_CHANNEL_LABEL};
+use crate::rtc::{build_api_with_options, WebRtcDatagrams, DATA_CHANNEL_LABEL};
 use crate::signaling::{FreddieClient, SignalingError};
 
 #[derive(Debug, Clone)]
@@ -24,12 +24,14 @@ pub struct PeerProxyConfig {
     pub stun_urls: Vec<String>,
     pub nat_timeout: Duration,
     pub enable_ipv6: bool,
+    pub randomize_dtls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerProxyOutcome {
     pub consumer_session_id: String,
     pub relay_end: RelayEnd,
+    pub relay_duration: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,8 +63,12 @@ pub enum PeerProxyError {
     DataChannelClosed,
     #[error("egress tunnel failed: {0}")]
     Egress(#[from] EgressError),
-    #[error("packet relay failed: {0}")]
-    Relay(#[from] RelayError),
+    #[error("packet relay failed after {relay_duration:?}: {source}")]
+    Relay {
+        relay_duration: Duration,
+        #[source]
+        source: RelayError,
+    },
     #[error("peer proxy session cancelled")]
     Cancelled,
 }
@@ -136,7 +142,7 @@ pub async fn run_peer_proxy_until_cancelled(
     cancellation: CancellationToken,
 ) -> Result<PeerProxyOutcome, PeerProxyError> {
     let freddie = FreddieClient::new(&config.freddie_endpoint)?;
-    let api = build_api_with_ipv6(config.enable_ipv6)?;
+    let api = build_api_with_options(config.enable_ipv6, config.randomize_dtls)?;
     let ice_servers = if config.stun_urls.is_empty() {
         Vec::new()
     } else {
@@ -237,10 +243,18 @@ pub async fn run_peer_proxy_until_cancelled(
             .map_err(|_| PeerProxyError::DataChannelClosed)?;
         let mut egress =
             EgressTunnel::connect(&config.egress_url, &ice.consumer_session_id).await?;
-        let relay_end = relay(&mut peer, &mut egress).await?;
+        let relay_started = tokio::time::Instant::now();
+        let relay_end =
+            relay(&mut peer, &mut egress)
+                .await
+                .map_err(|source| PeerProxyError::Relay {
+                    relay_duration: relay_started.elapsed(),
+                    source,
+                })?;
         Ok(PeerProxyOutcome {
             consumer_session_id: ice.consumer_session_id,
             relay_end,
+            relay_duration: relay_started.elapsed(),
         })
     };
 
@@ -252,6 +266,15 @@ pub async fn run_peer_proxy_until_cancelled(
 
     let _ = connection.close().await;
     result
+}
+
+impl PeerProxyError {
+    pub fn relay_duration(&self) -> Option<Duration> {
+        match self {
+            Self::Relay { relay_duration, .. } => Some(*relay_duration),
+            _ => None,
+        }
+    }
 }
 
 fn expect_signal(
@@ -345,6 +368,7 @@ mod tests {
                 stun_urls: Vec::new(),
                 nat_timeout: Duration::from_secs(1),
                 enable_ipv6: false,
+                randomize_dtls: false,
             },
             cancellation.clone(),
         ));

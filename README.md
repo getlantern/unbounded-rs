@@ -49,11 +49,21 @@ Operational settings are environment variables:
 | `UNBOUNDED_RETRY_INITIAL_SECONDS` | 1 | Initial retry delay |
 | `UNBOUNDED_RETRY_MAX_SECONDS` | 30 | Maximum retry delay, including jitter |
 | `UNBOUNDED_STABLE_SESSION_SECONDS` | 30 | Session duration that resets retry backoff |
+| `UNBOUNDED_COVERT_DTLS` | `randomize` | Set to `disable` only for controlled diagnostics |
 | `UNBOUNDED_ENABLE_IPV6` | unset | Set to `1` to gather IPv6 ICE candidates |
 
 Library embedders can consume slot-tagged `PoolEvent` and `SupervisorEvent`
 values for attempt, session, failure, backoff, and shutdown reporting.
 Cancellation closes every active WebRTC peer connection before the pool exits.
+Third-party logs default to `error` to avoid exposing ICE candidate addresses;
+operators can opt into more detail with `RUST_LOG`.
+
+DTLS ClientHello randomization is enabled by default. Cipher suites and
+extensions retain their negotiated contents but are independently reordered on
+each ClientHello flight, preventing the stable library-default fingerprint that
+has been filtered in deployed censored networks. The pinned WebRTC dependency
+contains the typed hook proposed upstream in
+[`webrtc-rs/webrtc#814`](https://github.com/webrtc-rs/webrtc/pull/814).
 
 The peer proxy uses IPv4 ICE candidates by default. This avoids advertising
 unroutable link-local IPv6 candidates on hosts such as macOS. Set

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use rand::seq::SliceRandom;
 use tokio::sync::mpsc;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -19,10 +20,17 @@ pub const DATA_CHANNEL_LABEL: &str = "data";
 pub const DEFAULT_DATA_CHANNEL_QUEUE: usize = 4096;
 
 pub fn build_api() -> Result<API, webrtc::Error> {
-    build_api_with_ipv6(true)
+    build_api_with_options(true, true)
 }
 
 pub fn build_api_with_ipv6(enable_ipv6: bool) -> Result<API, webrtc::Error> {
+    build_api_with_options(enable_ipv6, true)
+}
+
+pub fn build_api_with_options(
+    enable_ipv6: bool,
+    randomize_dtls: bool,
+) -> Result<API, webrtc::Error> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs()?;
     let registry = register_default_interceptors(
@@ -35,6 +43,18 @@ pub fn build_api_with_ipv6(enable_ipv6: bool) -> Result<API, webrtc::Error> {
         network_types.push(NetworkType::Udp6);
     }
     settings.set_network_types(network_types);
+    if randomize_dtls {
+        settings.set_dtls_client_hello_message_hook(Arc::new(|mut hello| {
+            let mut rng = rand::rng();
+            let mut cipher_suites = hello.cipher_suites().to_vec();
+            cipher_suites.shuffle(&mut rng);
+            hello.set_cipher_suites(cipher_suites);
+            let mut extensions = hello.extensions().to_vec();
+            extensions.shuffle(&mut rng);
+            hello.set_extensions(extensions);
+            hello
+        }));
+    }
     Ok(APIBuilder::new()
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
@@ -230,5 +250,10 @@ mod tests {
 
         offer.close().await.unwrap();
         answer.close().await.unwrap();
+    }
+
+    #[test]
+    fn covert_dtls_can_be_disabled_for_diagnostics() {
+        assert!(build_api_with_options(false, false).is_ok());
     }
 }

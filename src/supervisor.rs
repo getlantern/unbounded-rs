@@ -150,7 +150,11 @@ where
             break;
         }
 
-        let stable = result.is_ok() && duration >= config.stable_session;
+        let relay_duration = match &result {
+            Ok(outcome) => Some(outcome.relay_duration),
+            Err(error) => error.relay_duration(),
+        };
+        let stable = relay_duration.is_some_and(|duration| duration >= config.stable_session);
         if stable {
             backoff = initial_backoff;
         }
@@ -232,6 +236,7 @@ fn jittered(base: Duration, entropy: u64) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -245,6 +250,7 @@ mod tests {
                 stun_urls: Vec::new(),
                 nat_timeout: Duration::from_millis(1),
                 enable_ipv6: false,
+                randomize_dtls: false,
             },
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
@@ -291,6 +297,54 @@ mod tests {
         assert_eq!(summary.attempts, 3);
         assert_eq!(summary.failed_attempts, 2);
         assert_eq!(summary.completed_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn stable_relay_resets_backoff_even_when_transport_fails() {
+        let cancellation = CancellationToken::new();
+        let attempts = Arc::new(AtomicU64::new(0));
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let mut config = test_config();
+        config.initial_backoff = Duration::from_millis(10);
+        config.max_backoff = Duration::from_millis(40);
+        config.stable_session = Duration::from_secs(30);
+
+        supervise_with(config, cancellation.clone(), Some(events_tx), {
+            let attempts = attempts.clone();
+            move |_, _| {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let cancellation = cancellation.clone();
+                async move {
+                    match attempt {
+                        1 => Err(PeerProxyError::Relay {
+                            relay_duration: Duration::from_secs(31),
+                            source: crate::relay::RelayError::Peer(Box::new(io::Error::other(
+                                "test relay failure",
+                            ))),
+                        }),
+                        2 => Err(PeerProxyError::MissingResponse("test response")),
+                        _ => {
+                            cancellation.cancel();
+                            Err(PeerProxyError::Cancelled)
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        let mut second_retry = None;
+        while let Ok(event) = events_rx.try_recv() {
+            if let SupervisorEvent::AttemptFailed {
+                attempt: 2,
+                retry_in,
+                ..
+            } = event
+            {
+                second_retry = Some(retry_in);
+            }
+        }
+        assert!(second_retry.unwrap() <= Duration::from_millis(12));
     }
 
     #[test]

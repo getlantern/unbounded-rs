@@ -48,3 +48,16 @@ shutdown token and event sink are shared.
 Cancellation is distinct from failure. It interrupts signaling, NAT traversal,
 an active relay, or a retry delay; closes the current WebRTC peer connection;
 and exits without incrementing the failed-attempt count.
+
+## DTLS fingerprint resistance
+
+The sharing peer is the WebRTC answerer and therefore the active DTLS endpoint
+that sends the ClientHello. The Rust peer randomizes cipher-suite and extension
+ordering for every ClientHello flight, including the retry carrying a
+HelloVerifyRequest cookie. This preserves the negotiated values and the DTLS
+state machine while avoiding a stable library-default fingerprint.
+
+The current Rust DTLS stack is DTLS 1.2. It deliberately does not claim to
+mimic current Chrome DTLS 1.3 fingerprints, which include unsupported cipher
+suites and post-quantum key-share structures. Browser mimicry should only be
+added when those messages can be represented faithfully end to end.
