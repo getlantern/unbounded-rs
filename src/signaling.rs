@@ -15,9 +15,8 @@ pub enum SignalingError {
     #[cfg(feature = "reqwest-client")]
     #[error("invalid Freddie endpoint: {0}")]
     InvalidEndpoint(#[from] url::ParseError),
-    #[cfg(feature = "reqwest-client")]
     #[error("Freddie request failed: {0}")]
-    Transport(#[from] reqwest::Error),
+    Transport(String),
     #[error("Freddie rejected protocol version {0}")]
     ProtocolVersion(String),
     #[error("Freddie signaling recipient is no longer available")]
@@ -100,7 +99,8 @@ impl FreddieClient {
                 ("type", &(kind as u8).to_string()),
             ])
             .send()
-            .await?;
+            .await
+            .map_err(|error| SignalingError::Transport(error.to_string()))?;
 
         match response.status() {
             StatusCode::OK => {}
@@ -111,7 +111,10 @@ impl FreddieClient {
             status => return Err(SignalingError::Http(status.as_u16())),
         }
 
-        let body = response.bytes().await?;
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| SignalingError::Transport(error.to_string()))?;
         if body.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);
         }
@@ -124,7 +127,8 @@ impl FreddieClient {
             .get(self.endpoint.clone())
             .header(VERSION_HEADER, &self.version)
             .send()
-            .await?;
+            .await
+            .map_err(|error| SignalingError::Transport(error.to_string()))?;
         match response.status() {
             StatusCode::OK => Ok(AdvertisementStream {
                 response,
@@ -162,7 +166,12 @@ impl AdvertisementStream {
                 return Ok(Some(serde_json::from_slice(&line)?));
             }
 
-            match self.response.chunk().await? {
+            match self
+                .response
+                .chunk()
+                .await
+                .map_err(|error| SignalingError::Transport(error.to_string()))?
+            {
                 Some(chunk) => self.buffered.extend_from_slice(&chunk),
                 None if self.buffered.iter().all(u8::is_ascii_whitespace) => return Ok(None),
                 None => {
