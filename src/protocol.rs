@@ -42,6 +42,52 @@ pub struct SignalMessage {
     pub payload: String,
 }
 
+impl SignalMessage {
+    pub fn decode_payload<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        serde_json::from_str(&self.payload)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endpoint {
+    #[serde(rename = "Host")]
+    pub host: String,
+    #[serde(rename = "Distance")]
+    pub distance: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathAssertion {
+    #[serde(rename = "Allow")]
+    pub allow: Option<Vec<Endpoint>>,
+    #[serde(rename = "Deny")]
+    pub deny: Option<Vec<Endpoint>>,
+    #[serde(rename = "JITUnavailable")]
+    pub jit_unavailable: bool,
+}
+
+impl PathAssertion {
+    pub fn all_hosts_on_request() -> Self {
+        Self {
+            allow: Some(vec![Endpoint {
+                host: "$".into(),
+                distance: 1,
+            }]),
+            deny: None,
+            jit_unavailable: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisMessage {
+    #[serde(rename = "PathAssertion")]
+    pub path_assertion: PathAssertion,
+}
+
 pub fn egress_subprotocols(csid: &str, version: &str) -> [String; 3] {
     [
         SUBPROTOCOL_MAGIC_COOKIE.to_owned(),
@@ -107,6 +153,17 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&message).unwrap(),
             r#"{"ReplyTo":"request-42","Type":3,"Payload":"{\"ConsumerSessionID\":\"abc\"}"}"#
+        );
+    }
+
+    #[test]
+    fn genesis_matches_go_encoding_json() {
+        let genesis = GenesisMessage {
+            path_assertion: PathAssertion::all_hosts_on_request(),
+        };
+        assert_eq!(
+            serde_json::to_string(&genesis).unwrap(),
+            r#"{"PathAssertion":{"Allow":[{"Host":"$","Distance":1}],"Deny":null,"JITUnavailable":false}}"#
         );
     }
 
