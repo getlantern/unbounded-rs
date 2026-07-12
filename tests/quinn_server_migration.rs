@@ -2,11 +2,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lantern_unbounded::{VirtualPath, VirtualUdpSocket};
+use lantern_unbounded::{ConsumerQuicServer, VirtualPath, VirtualUdpSocket};
 use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use quinn::{
     AsyncUdpSocket, ClientConfig, Endpoint, EndpointConfig, ServerConfig, TransportConfig,
 };
+use tokio_util::sync::CancellationToken;
 
 fn addr(last_octet: u8, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, last_octet)), port)
@@ -88,13 +89,7 @@ async fn quinn_server_keeps_stream_across_client_path_migration() {
         client_a_socket.add_path(server_addr, 256),
     );
 
-    let server = Endpoint::new_with_abstract_socket(
-        EndpointConfig::default(),
-        Some(server_config),
-        server_socket.clone(),
-        Arc::new(quinn::TokioRuntime),
-    )
-    .unwrap();
+    let server = ConsumerQuicServer::new(server_socket.clone(), server_config).unwrap();
     let mut client = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
         None,
@@ -106,11 +101,9 @@ async fn quinn_server_keeps_stream_across_client_path_migration() {
 
     let server_accept = async {
         server
-            .accept()
+            .accept(&CancellationToken::new())
             .await
             .expect("incoming QUIC handshake")
-            .await
-            .unwrap()
     };
     let client_connect = async {
         client
@@ -170,5 +163,5 @@ async fn quinn_server_keeps_stream_across_client_path_migration() {
     path_a.abort();
     path_b.abort();
     client.close(0_u8.into(), b"test complete");
-    server.close(0_u8.into(), b"test complete");
+    server.close();
 }

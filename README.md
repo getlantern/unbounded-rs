@@ -21,9 +21,17 @@ churn; the Rust consumer only needs Quinn's server-side migration support.
 ## Status
 
 The protocol and migration foundation is complete. The native peer-proxy path
-now includes Freddie signaling, a Pion-compatible unreliable/unordered WebRTC
+includes Freddie signaling, a Pion-compatible unreliable/unordered WebRTC
 DataChannel, the CSID-authenticated egress WebSocket, and bidirectional packet
-relay. See [`docs/wire-protocol.md`](docs/wire-protocol.md).
+relay.
+
+The censored-consumer library path now includes Freddie advertisement
+selection and offerer signaling, replaceable WebRTC sessions, Go-compatible
+ICE candidate encoding, egress packet-envelope decoding, synthetic path
+addresses, and a stable Quinn server endpoint. `maintain_consumer` re-pairs
+after peer churn while preserving the virtual UDP socket and consumer session
+ID that identify the existing QUIC connection. See
+[`docs/wire-protocol.md`](docs/wire-protocol.md).
 
 ```sh
 cargo test
@@ -68,6 +76,24 @@ lantern-unbounded = { version = "0.1", default-features = false }
 
 The default `native-client` feature retains the standalone `peer-proxy` binary
 and the `FreddieClient` implementation used by the command above.
+
+## Censored-consumer embedding
+
+`ConsumerConfig::new` accepts an object-safe `ConsumerSignaler`, the stable
+`VirtualUdpSocket`, a `SyntheticPathAllocator`, and a caller-owned consumer
+session ID. `FreddieClient` implements both the peer-proxy `Signaler` and the
+consumer advertisement interface; Spark can provide the same interfaces from
+its existing HTTP stack with default features disabled.
+
+`ConsumerQuicServer` runs Quinn over that virtual socket and applies the Go
+transport contract: 131072 incoming streams in each direction, a 60-second
+idle timeout, 15-second keepalive, and a fixed 1200-byte path MTU. The supplied
+Quinn TLS configuration must advertise the `broflake` ALPN value exposed as
+`CONSUMER_QUIC_ALPN`.
+
+The remaining integration work is production STUN cohort sourcing/rotation,
+Spark proxy wiring around accepted Quinn connections, and live validation of
+the Rust consumer against the deployed Go Freddie, peer proxy, and egress.
 
 DTLS ClientHello randomization is enabled by default. Cipher suites and
 extensions retain their negotiated contents but are independently reordered on
