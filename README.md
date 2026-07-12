@@ -91,9 +91,21 @@ idle timeout, 15-second keepalive, and a fixed 1200-byte path MTU. The supplied
 Quinn TLS configuration must advertise the `broflake` ALPN value exposed as
 `CONSUMER_QUIC_ALPN`.
 
+`ConsumerQuicBroker` owns the long-lived accept loop. Its cloneable
+`ConsumerQuicDialer` waits for the current or next infrastructure-owned QUIC
+client and opens a bidirectional stream, so an embedding proxy does not need to
+own connection churn or path migration. Both the broker and pending stream
+opens are cancellation-aware. A closed infrastructure connection clears the
+current state, and later stream opens wait for its replacement.
+
+`ConsumerQuicDialer::connect_socks5` adds the target-routing handshake used by
+the Go consumer and egress. It supports IPv4, IPv6, and domain targets, fully
+consumes the server's variable-length bound-address response, and returns the
+same stream ready for transparent application bytes.
+
 The remaining integration work is production STUN cohort sourcing/rotation,
-Spark proxy wiring around accepted Quinn connections, and live validation of
-the Rust consumer against the deployed Go Freddie, peer proxy, and egress.
+Spark transport wiring, and live validation of the Rust consumer against the
+deployed Go Freddie, peer proxy, and egress.
 
 DTLS ClientHello randomization is enabled by default. Cipher suites and
 extensions retain their negotiated contents but are independently reordered on
