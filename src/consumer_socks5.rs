@@ -28,12 +28,16 @@ pub enum ConsumerSocks5Error {
     Io(#[from] io::Error),
     #[error("consumer SOCKS5 domain is too long: {0} bytes")]
     DomainTooLong(usize),
+    #[error("consumer SOCKS5 domain is empty")]
+    EmptyDomain,
     #[error("consumer SOCKS5 server selected unsupported auth method {0:#04x}")]
     UnsupportedAuth(u8),
     #[error("consumer SOCKS5 server returned version {0:#04x}")]
     InvalidVersion(u8),
     #[error("consumer SOCKS5 server rejected CONNECT with status {0:#04x}")]
     ConnectRejected(u8),
+    #[error("consumer SOCKS5 server returned reserved byte {0:#04x}")]
+    InvalidReserved(u8),
     #[error("consumer SOCKS5 server returned invalid address type {0:#04x}")]
     InvalidAddressType(u8),
 }
@@ -68,6 +72,9 @@ where
             request.extend_from_slice(&address.port().to_be_bytes());
         }
         Socks5Target::Domain { host, port } => {
+            if host.is_empty() {
+                return Err(ConsumerSocks5Error::EmptyDomain);
+            }
             let length = u8::try_from(host.len())
                 .map_err(|_| ConsumerSocks5Error::DomainTooLong(host.len()))?;
             request.extend_from_slice(&[0x03, length]);
@@ -84,6 +91,9 @@ where
     }
     if reply[1] != 0x00 {
         return Err(ConsumerSocks5Error::ConnectRejected(reply[1]));
+    }
+    if reply[2] != 0x00 {
+        return Err(ConsumerSocks5Error::InvalidReserved(reply[2]));
     }
     let address_length = match reply[3] {
         0x01 => 4,
@@ -203,6 +213,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, ConsumerSocks5Error::ConnectRejected(0x05)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_domain_before_writing_connect_request() {
+        let (client, mut server) = tokio::io::duplex(256);
+        let server = tokio::spawn(async move {
+            let mut greeting = [0_u8; 3];
+            server.read_exact(&mut greeting).await.unwrap();
+            server.write_all(&[0x05, 0x00]).await.unwrap();
+        });
+        let error = socks5_connect(
+            client,
+            &Socks5Target::Domain {
+                host: String::new(),
+                port: 80,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ConsumerSocks5Error::EmptyDomain));
         server.await.unwrap();
     }
 

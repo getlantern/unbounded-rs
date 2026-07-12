@@ -91,6 +91,7 @@ impl ConsumerQuicBroker {
                     self.connections.send_replace(None);
                     return Ok(());
                 }
+                Err(ConsumerQuicError::Handshake(_)) => continue,
                 Err(error) => return Err(error),
             };
             self.connections.send_replace(Some(connection.clone()));
