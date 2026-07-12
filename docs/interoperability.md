@@ -23,6 +23,15 @@ On 2026-07-11 this scenario completed with HTTP 200 and exactly 20 MiB received.
 The Go egress reported a successful migration after a 25.145-second probe, and
 the open stream resumed over peer B within the existing QUIC idle timeout.
 
+On 2026-07-12 the inverse mixed-language path also completed: the Spark Rust
+consumer and two successive Rust peers used a local Go Freddie and the deployed
+Go egress at `wss://unbounded.iantem.io/ws`. Peer A was stopped after 2.9 MB of
+a 20 MB HTTP response. The consumer advertised a replacement path, peer B
+attached with the same consumer session ID, and the original QUIC stream
+resumed without an application reconnect. The request finished with HTTP 200,
+20,001,492 wire bytes, two consumer attempts, one completed path, and zero
+failed attempts.
+
 ## Compatibility details found live
 
 - Pion encodes the ICE candidate `protocol` field numerically: `1` for UDP and
@@ -30,6 +39,9 @@ the open stream resumed over peer B within the existing QUIC idle timeout.
 - The DataChannel label is `data`, with ordering disabled and zero retransmits.
 - The egress WebSocket subprotocols are ordered as `un80und3d`, the consumer
   session ID, and `v2.3.0`.
+- quic-go starts paths with 1280-byte packets and can probe as high as 1452
+  bytes. The Rust consumer's virtual UDP ingress must accept that full range,
+  even though Quinn's own outbound path remains pinned to 1200 bytes.
 - IPv4-only ICE is the safe peer-proxy default. Link-local IPv6 interfaces on
   macOS can produce candidates that pass signaling but never nominate.
 
