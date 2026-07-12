@@ -91,5 +91,17 @@ The parent signaling envelope uses Go field names and a numeric message type:
 | Answer | 2 | WebRTC session description |
 | ICE | 3 | `ICEMsg`, including `ConsumerSessionID` |
 
-The detailed HTTP exchange, SDP/ICE vectors, timeout behavior, and Freddie
-request identifiers are the next compatibility checkpoint.
+Every request carries `X-BF-Version: v2.3.0`. Signaling messages are posted as
+`application/x-www-form-urlencoded` with `data`, `send-to`, and numeric `type`
+fields. A `418` rejects the protocol version, `404` means the response request
+has expired, and `200` with an empty body means no peer replied before the
+server TTL. Consumer advertisement streams are newline-delimited signaling
+envelopes returned by `GET /v1/signal`.
+
+The peer-proxy exchange is:
+
+1. POST Genesis to `genesis`; wait for an Offer response.
+2. Apply the consumer's offer and gather local ICE candidates.
+3. POST the complete Answer to the offer's `ReplyTo`; wait for ICE.
+4. Convert the Pion candidate objects to W3C candidate strings and add them.
+5. Use `ConsumerSessionID` from the ICE payload when opening the egress socket.
