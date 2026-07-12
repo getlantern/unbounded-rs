@@ -87,9 +87,11 @@ its existing HTTP stack with default features disabled.
 
 `ConsumerQuicServer` runs Quinn over that virtual socket and applies the Go
 transport contract: 131072 incoming streams in each direction, a 60-second
-idle timeout, 15-second keepalive, and a fixed 1200-byte path MTU. The supplied
-Quinn TLS configuration must advertise the `broflake` ALPN value exposed as
-`CONSUMER_QUIC_ALPN`.
+idle timeout, and a 15-second keepalive. Quinn sends conservative 1200-byte
+packets; the virtual path accepts up to 1452 bytes so the infrastructure Go
+egress's 1280-byte initial packets and path-MTU probes are not discarded. The
+supplied Quinn TLS configuration must advertise the `broflake` ALPN value
+exposed as `CONSUMER_QUIC_ALPN`.
 
 `ConsumerQuicBroker` owns the long-lived accept loop. Its cloneable
 `ConsumerQuicDialer` waits for the current or next infrastructure-owned QUIC
