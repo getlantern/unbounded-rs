@@ -35,7 +35,7 @@ impl SyntheticPathAllocator {
         let host = self
             .next_host
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                (current < CGNAT_HOSTS - 1).then_some(current + 1)
+                (current < CGNAT_HOSTS).then_some(current + 1)
             })
             .map_err(|_| ConsumerPathError::AddressSpaceExhausted)?;
         Ok(SocketAddr::new(
@@ -177,6 +177,21 @@ mod tests {
             allocator.allocate().unwrap(),
             "100.64.0.3:443".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn allocates_the_final_cgnat_address_then_reports_exhaustion() {
+        let allocator = SyntheticPathAllocator {
+            next_host: AtomicU32::new(CGNAT_HOSTS - 1),
+        };
+        assert_eq!(
+            allocator.allocate().unwrap(),
+            "100.127.255.255:443".parse::<SocketAddr>().unwrap()
+        );
+        assert!(matches!(
+            allocator.allocate(),
+            Err(ConsumerPathError::AddressSpaceExhausted)
+        ));
     }
 
     #[tokio::test]
