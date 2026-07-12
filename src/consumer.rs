@@ -380,7 +380,11 @@ async fn select_genesis(
     patience: Duration,
     cancellation: &CancellationToken,
 ) -> Result<SignalMessage, ConsumerError> {
-    let mut advertisements = signaler.advertisements().await?;
+    let mut advertisements = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(ConsumerError::Cancelled),
+        advertisements = signaler.advertisements() => advertisements?,
+    };
     let first = loop {
         let message = tokio::select! {
             biased;
@@ -448,6 +452,28 @@ mod tests {
     use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 
     struct SingleAdvertisement(Option<SignalMessage>);
+
+    #[derive(Debug)]
+    struct StalledAdvertisementSignaler;
+
+    #[async_trait]
+    impl Signaler for StalledAdvertisementSignaler {
+        async fn exchange(
+            &self,
+            _send_to: &str,
+            _kind: SignalMessageType,
+            _payload: &str,
+        ) -> Result<Option<SignalMessage>, SignalingError> {
+            unreachable!("the advertisement stream never opens")
+        }
+    }
+
+    #[async_trait]
+    impl ConsumerSignaler for StalledAdvertisementSignaler {
+        async fn advertisements(&self) -> Result<Box<dyn AdvertisementSource>, SignalingError> {
+            std::future::pending().await
+        }
+    }
 
     #[async_trait]
     impl AdvertisementSource for SingleAdvertisement {
@@ -589,6 +615,16 @@ mod tests {
         assert_eq!(encoded["type"], "srflx");
         assert_eq!(encoded["relatedAddress"], "192.168.1.20");
         assert!(encoded.get("sdpMid").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_advertisement_stream_creation() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = select_genesis(&StalledAdvertisementSignaler, Duration::ZERO, &cancellation)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConsumerError::Cancelled));
     }
 
     #[tokio::test]
