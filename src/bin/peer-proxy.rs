@@ -71,6 +71,12 @@ async fn main() {
                 SupervisorEvent::AttemptStarted { attempt } => {
                     eprintln!("slot {slot}: starting peer proxy attempt {attempt}");
                 }
+                SupervisorEvent::PeerConnected { session_id, remote } => {
+                    eprintln!("slot {slot}: peer {session_id} connected (remote {remote:?})");
+                }
+                SupervisorEvent::PeerDisconnected { session_id } => {
+                    eprintln!("slot {slot}: peer {session_id} disconnected");
+                }
                 SupervisorEvent::SessionEnded {
                     attempt,
                     outcome,

@@ -1,22 +1,27 @@
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate_pair::RTCIceCandidatePair;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_protocol::RTCIceProtocol;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::egress::{EgressError, EgressTunnel};
-use crate::protocol::{GenesisMessage, PathAssertion, SignalMessageType};
+use crate::protocol::{is_subprotocol_token, GenesisMessage, PathAssertion, SignalMessageType};
 use crate::relay::{relay, RelayEnd, RelayError};
 use crate::rtc::{build_api_with_options, WebRtcDatagrams, DATA_CHANNEL_LABEL};
 use crate::signaling::{Signaler, SignalingError};
+use crate::supervisor::SupervisorEvent;
 
 type DataChannelWaitSender<T> =
     Arc<Mutex<Option<oneshot::Sender<Result<T, RTCPeerConnectionState>>>>>;
@@ -59,6 +64,8 @@ pub enum PeerProxyError {
     },
     #[error("consumer supplied no session ID")]
     MissingConsumerSessionId,
+    #[error("consumer supplied a malformed session ID")]
+    InvalidConsumerSessionId,
     #[error("consumer supplied an invalid ICE candidate: {0}")]
     InvalidIceCandidate(#[source] webrtc::Error),
     #[error("timed out waiting for the consumer WebRTC DataChannel")]
@@ -140,12 +147,13 @@ impl PionIceCandidate {
 }
 
 pub async fn run_peer_proxy(config: PeerProxyConfig) -> Result<PeerProxyOutcome, PeerProxyError> {
-    run_peer_proxy_until_cancelled(config, CancellationToken::new()).await
+    run_peer_proxy_until_cancelled(config, CancellationToken::new(), None).await
 }
 
 pub async fn run_peer_proxy_until_cancelled(
     config: PeerProxyConfig,
     cancellation: CancellationToken,
+    events: Option<mpsc::UnboundedSender<SupervisorEvent>>,
 ) -> Result<PeerProxyOutcome, PeerProxyError> {
     let api = build_api_with_options(config.enable_ipv6, config.randomize_dtls)?;
     let ice_servers = if config.stun_urls.is_empty() {
@@ -167,9 +175,67 @@ pub async fn run_peer_proxy_until_cancelled(
     let (data_channel_tx, data_channel_rx) = oneshot::channel();
     let data_channel_tx = Arc::new(Mutex::new(Some(data_channel_tx)));
     let state_data_channel_tx = data_channel_tx.clone();
+
+    // The consumer session ID is not known until the ICE signaling message is
+    // decoded, which happens after this handler is registered. It is always set
+    // before ICE candidates are added, so it is guaranteed present by the time
+    // the connection can reach Connected. `PeerConnected`/`PeerDisconnected` are
+    // only emitted once the ID is known.
+    let session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Guards emitting exactly one `PeerDisconnected` per connected session.
+    let disconnect_emitted = Arc::new(AtomicBool::new(false));
+    // Only emit `PeerDisconnected` for a session that actually reached `Connected`,
+    // so a session that fails straight to Failed/Closed emits nothing.
+    let connect_emitted = Arc::new(AtomicBool::new(false));
+
+    let state_connection = connection.clone();
+    let state_events = events.clone();
+    let state_session_id = session_id.clone();
+    let state_disconnect_emitted = disconnect_emitted.clone();
+    let state_connect_emitted = connect_emitted.clone();
     connection.on_peer_connection_state_change(Box::new(move |state| {
         fail_data_channel_wait(state, &state_data_channel_tx);
-        Box::pin(async {})
+        let connection = state_connection.clone();
+        let events = state_events.clone();
+        let session_id = state_session_id.clone();
+        let disconnect_emitted = state_disconnect_emitted.clone();
+        let connect_emitted = state_connect_emitted.clone();
+        Box::pin(async move {
+            let Some(events) = events else {
+                return;
+            };
+            // Convention: no unwrap() outside tests. A poisoned lock (only if a
+            // holder panicked) is treated like "id not yet known" — skip the event.
+            // The guard is scoped to this block so it is dropped before the await
+            // below — a MutexGuard is !Send and must not live across an await point.
+            let session_id = {
+                let Ok(guard) = session_id.lock() else {
+                    return;
+                };
+                let Some(id) = guard.clone() else {
+                    return;
+                };
+                id
+            };
+            match state {
+                RTCPeerConnectionState::Connected => {
+                    connect_emitted.store(true, Ordering::SeqCst);
+                    let selected_pair = selected_candidate_pair(&connection).await;
+                    let _ = events.send(peer_connected_event(session_id, selected_pair.as_ref()));
+                }
+                // Emit a disconnect only for a session that reached Connected, and
+                // only on the first terminal transition (Disconnected → Failed →
+                // Closed yields one event).
+                state
+                    if is_disconnect_state(state)
+                        && connect_emitted.load(Ordering::SeqCst)
+                        && !disconnect_emitted.swap(true, Ordering::SeqCst) =>
+                {
+                    let _ = events.send(peer_disconnected_event(session_id));
+                }
+                _ => {}
+            }
+        })
     }));
     connection.on_data_channel(Box::new(move |channel| {
         if channel.label() == DATA_CHANNEL_LABEL {
@@ -237,6 +303,16 @@ pub async fn run_peer_proxy_until_cancelled(
         if ice.consumer_session_id.is_empty() {
             return Err(PeerProxyError::MissingConsumerSessionId);
         }
+        // The session ID is peer-supplied and flows into emitted peer-state events
+        // (and is logged by bin/peer-proxy). Reject anything that isn't a clean
+        // subprotocol token before it can be published, to prevent log/telemetry
+        // injection via commas, whitespace, or control bytes.
+        if !is_subprotocol_token(&ice.consumer_session_id) {
+            return Err(PeerProxyError::InvalidConsumerSessionId);
+        }
+        // Publish the session ID before adding candidates so the peer-connection
+        // state-change handler can label its events once ICE completes.
+        *session_id.lock().unwrap() = Some(ice.consumer_session_id.clone());
 
         for candidate in &ice.candidates {
             let mut init = candidate
@@ -289,6 +365,46 @@ fn is_terminal_peer_state(state: RTCPeerConnectionState) -> bool {
     )
 }
 
+/// States that mean a previously connected peer has gone away. Kept as a named
+/// seam so the exactly-once disconnect logic can be unit-tested in isolation.
+fn is_disconnect_state(state: RTCPeerConnectionState) -> bool {
+    is_terminal_peer_state(state)
+}
+
+/// Reads the connected peer's address from a selected ICE candidate pair's
+/// remote candidate. Returns `None` when the address is not an IP literal (e.g.
+/// an mDNS `.local` hostname).
+fn socket_addr_from_candidate(candidate: &RTCIceCandidate) -> Option<SocketAddr> {
+    let ip = candidate.address.parse().ok()?;
+    Some(SocketAddr::new(ip, candidate.port))
+}
+
+/// Builds the `PeerConnected` event for a session, extracting the remote address
+/// from the selected candidate pair when one is available.
+fn peer_connected_event(
+    session_id: String,
+    selected_pair: Option<&RTCIceCandidatePair>,
+) -> SupervisorEvent {
+    let remote = selected_pair.and_then(|pair| socket_addr_from_candidate(&pair.remote));
+    SupervisorEvent::PeerConnected { session_id, remote }
+}
+
+/// Builds the `PeerDisconnected` event for a session.
+fn peer_disconnected_event(session_id: String) -> SupervisorEvent {
+    SupervisorEvent::PeerDisconnected { session_id }
+}
+
+/// Reads the selected ICE candidate pair for a peer connection, walking
+/// SCTP → DTLS → ICE. Returns `None` when any layer is unavailable.
+async fn selected_candidate_pair(connection: &RTCPeerConnection) -> Option<RTCIceCandidatePair> {
+    connection
+        .sctp()
+        .transport()
+        .ice_transport()
+        .get_selected_candidate_pair()
+        .await
+}
+
 fn fail_data_channel_wait<T>(state: RTCPeerConnectionState, sender: &DataChannelWaitSender<T>) {
     if is_terminal_peer_state(state) {
         if let Some(tx) = sender.lock().unwrap().take() {
@@ -332,6 +448,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "reqwest-client")]
     use crate::signaling::FreddieClient;
+    use webrtc::ice_transport::ice_candidate_pair::RTCIceCandidatePair;
 
     #[test]
     fn decodes_pion_candidate_and_builds_rust_candidate_init() {
@@ -381,6 +498,88 @@ mod tests {
 
         assert_eq!(init.sdp_mid, None);
         assert_eq!(init.sdp_mline_index, None);
+    }
+
+    fn test_candidate(address: &str, port: u16) -> RTCIceCandidate {
+        RTCIceCandidate {
+            address: address.to_string(),
+            port,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reads_remote_socket_addr_from_ipv4_candidate() {
+        let candidate = test_candidate("203.0.113.8", 54321);
+        assert_eq!(
+            socket_addr_from_candidate(&candidate),
+            Some("203.0.113.8:54321".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn reads_remote_socket_addr_from_ipv6_candidate() {
+        let candidate = test_candidate("2001:db8::1", 443);
+        assert_eq!(
+            socket_addr_from_candidate(&candidate),
+            Some("[2001:db8::1]:443".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn unparseable_candidate_address_yields_no_remote() {
+        // mDNS candidates carry a ".local" hostname rather than an IP literal.
+        let candidate = test_candidate("abc-123.local", 54321);
+        assert_eq!(socket_addr_from_candidate(&candidate), None);
+    }
+
+    #[test]
+    fn peer_connected_event_carries_session_id_and_remote() {
+        let pair = RTCIceCandidatePair::new(
+            test_candidate("192.0.2.1", 3000),
+            test_candidate("203.0.113.8", 54321),
+        );
+        let event = peer_connected_event("session-42".to_string(), Some(&pair));
+        match event {
+            SupervisorEvent::PeerConnected { session_id, remote } => {
+                assert_eq!(session_id, "session-42");
+                assert_eq!(remote, Some("203.0.113.8:54321".parse().unwrap()));
+            }
+            other => panic!("expected PeerConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_connected_event_without_pair_has_no_remote() {
+        let event = peer_connected_event("session-42".to_string(), None);
+        match event {
+            SupervisorEvent::PeerConnected { session_id, remote } => {
+                assert_eq!(session_id, "session-42");
+                assert_eq!(remote, None);
+            }
+            other => panic!("expected PeerConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_disconnected_event_carries_session_id() {
+        let event = peer_disconnected_event("session-42".to_string());
+        match event {
+            SupervisorEvent::PeerDisconnected { session_id } => {
+                assert_eq!(session_id, "session-42");
+            }
+            other => panic!("expected PeerDisconnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_terminal_states_are_disconnects() {
+        assert!(is_disconnect_state(RTCPeerConnectionState::Disconnected));
+        assert!(is_disconnect_state(RTCPeerConnectionState::Failed));
+        assert!(is_disconnect_state(RTCPeerConnectionState::Closed));
+        assert!(!is_disconnect_state(RTCPeerConnectionState::Connected));
+        assert!(!is_disconnect_state(RTCPeerConnectionState::Connecting));
+        assert!(!is_disconnect_state(RTCPeerConnectionState::New));
     }
 
     #[test]
@@ -447,6 +646,7 @@ mod tests {
                 randomize_dtls: false,
             },
             cancellation.clone(),
+            None,
         ));
         tokio::time::timeout(Duration::from_secs(2), request_rx)
             .await

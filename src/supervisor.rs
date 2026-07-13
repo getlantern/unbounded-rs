@@ -29,6 +29,21 @@ pub enum SupervisorEvent {
     AttemptStarted {
         attempt: u64,
     },
+    /// A censored consumer's WebRTC connection reached the Connected state.
+    ///
+    /// `session_id` is the consumer's session ID (the same value carried on
+    /// [`PeerProxyOutcome::consumer_session_id`]). `remote` is the peer's
+    /// address read from the selected ICE candidate pair, or `None` when it is
+    /// unavailable (e.g. an mDNS candidate address that does not parse to an IP).
+    PeerConnected {
+        session_id: String,
+        remote: Option<std::net::SocketAddr>,
+    },
+    /// A previously connected consumer's WebRTC connection closed, failed, or
+    /// disconnected. Emitted exactly once per connected session.
+    PeerDisconnected {
+        session_id: String,
+    },
     SessionEnded {
         attempt: u64,
         outcome: PeerProxyOutcome,
@@ -113,9 +128,14 @@ pub async fn supervise_peer_proxy(
     cancellation: CancellationToken,
     events: Option<mpsc::UnboundedSender<SupervisorEvent>>,
 ) -> SupervisorSummary {
-    supervise_with(config, cancellation, events, |config, cancellation| {
-        run_peer_proxy_until_cancelled(config, cancellation)
-    })
+    supervise_with(
+        config,
+        cancellation,
+        events,
+        |config, cancellation, session_events| {
+            run_peer_proxy_until_cancelled(config, cancellation, session_events)
+        },
+    )
     .await
 }
 
@@ -126,7 +146,11 @@ async fn supervise_with<F, Fut>(
     run_session: F,
 ) -> SupervisorSummary
 where
-    F: Fn(PeerProxyConfig, CancellationToken) -> Fut,
+    F: Fn(
+        PeerProxyConfig,
+        CancellationToken,
+        Option<mpsc::UnboundedSender<SupervisorEvent>>,
+    ) -> Fut,
     Fut: Future<Output = Result<PeerProxyOutcome, PeerProxyError>>,
 {
     let initial_backoff = nonzero(config.initial_backoff);
@@ -143,7 +167,12 @@ where
         let attempt = summary.attempts;
         emit(&events, SupervisorEvent::AttemptStarted { attempt });
         let started = tokio::time::Instant::now();
-        let result = run_session(config.peer_proxy.clone(), cancellation.child_token()).await;
+        let result = run_session(
+            config.peer_proxy.clone(),
+            cancellation.child_token(),
+            events.clone(),
+        )
+        .await;
         let duration = started.elapsed();
 
         if result.is_err() && cancellation.is_cancelled() {
@@ -295,7 +324,7 @@ mod tests {
         let attempts = Arc::new(AtomicU64::new(0));
         let summary = supervise_with(test_config(), cancellation.clone(), None, {
             let attempts = attempts.clone();
-            move |_, _| {
+            move |_, _, _| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 let cancellation = cancellation.clone();
                 async move {
@@ -319,7 +348,7 @@ mod tests {
     async fn shutdown_race_does_not_count_a_transport_failure() {
         let cancellation = CancellationToken::new();
         let summary = supervise_with(test_config(), cancellation.clone(), None, {
-            move |_, _| {
+            move |_, _, _| {
                 let cancellation = cancellation.clone();
                 async move {
                     cancellation.cancel();
@@ -346,7 +375,7 @@ mod tests {
 
         supervise_with(config, cancellation.clone(), Some(events_tx), {
             let attempts = attempts.clone();
-            move |_, _| {
+            move |_, _, _| {
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
                 let cancellation = cancellation.clone();
                 async move {
