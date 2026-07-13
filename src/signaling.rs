@@ -45,6 +45,16 @@ pub trait Signaler: Send + Sync + Debug {
     ) -> Result<Option<SignalMessage>, SignalingError>;
 }
 
+#[async_trait]
+pub trait AdvertisementSource: Send {
+    async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError>;
+}
+
+#[async_trait]
+pub trait ConsumerSignaler: Signaler {
+    async fn advertisements(&self) -> Result<Box<dyn AdvertisementSource>, SignalingError>;
+}
+
 #[cfg(feature = "reqwest-client")]
 #[derive(Debug, Clone)]
 pub struct FreddieClient {
@@ -160,6 +170,14 @@ impl Signaler for FreddieClient {
 }
 
 #[cfg(feature = "reqwest-client")]
+#[async_trait]
+impl ConsumerSignaler for FreddieClient {
+    async fn advertisements(&self) -> Result<Box<dyn AdvertisementSource>, SignalingError> {
+        Ok(Box::new(FreddieClient::advertisements(self).await?))
+    }
+}
+
+#[cfg(feature = "reqwest-client")]
 impl AdvertisementStream {
     pub async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
         loop {
@@ -181,6 +199,14 @@ impl AdvertisementStream {
                 }
             }
         }
+    }
+}
+
+#[cfg(feature = "reqwest-client")]
+#[async_trait]
+impl AdvertisementSource for AdvertisementStream {
+    async fn next(&mut self) -> Result<Option<SignalMessage>, SignalingError> {
+        AdvertisementStream::next(self).await
     }
 }
 

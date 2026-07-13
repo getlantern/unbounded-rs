@@ -12,7 +12,10 @@ use quinn::{AsyncUdpSocket, UdpPoller};
 use tokio::sync::mpsc;
 
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
-pub const DEFAULT_PATH_MTU: usize = 1200;
+// quic-go starts at 1280 bytes and may probe up to its 1452-byte packet buffer ceiling. The
+// infrastructure-owned egress uses those defaults, so the consumer path must accept that full
+// ingress range even though Quinn's outbound side stays pinned to a conservative 1200 bytes.
+pub const DEFAULT_PATH_MTU: usize = 1452;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PathReceiveError {
@@ -306,6 +309,21 @@ mod tests {
             Err(PathReceiveError::Oversize {
                 actual: 1201,
                 mtu: 1200
+            })
+        );
+    }
+
+    #[test]
+    fn default_path_accepts_quic_go_packets_through_its_discovery_ceiling() {
+        let socket = VirtualUdpSocket::new(addr(1, 7000));
+        let path = socket.add_path(addr(2, 8000), 8);
+        path.try_receive(vec![0; 1280]).unwrap();
+        path.try_receive(vec![0; DEFAULT_PATH_MTU]).unwrap();
+        assert_eq!(
+            path.try_receive(vec![0; DEFAULT_PATH_MTU + 1]),
+            Err(PathReceiveError::Oversize {
+                actual: DEFAULT_PATH_MTU + 1,
+                mtu: DEFAULT_PATH_MTU,
             })
         );
     }

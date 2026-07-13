@@ -105,3 +105,18 @@ The peer-proxy exchange is:
 3. POST the complete Answer to the offer's `ReplyTo`; wait for ICE.
 4. Convert the Pion candidate objects to W3C candidate strings and add them.
 5. Use `ConsumerSessionID` from the ICE payload when opening the egress socket.
+
+The censored-consumer exchange is:
+
+1. Open the Freddie advertisement stream and collect Genesis candidates for
+   the configured patience interval.
+2. Create the unreliable `data` DataChannel and send an Offer to one selected
+   Genesis request.
+3. Apply the returned Answer, gather local ICE candidates, and encode Pion's
+   protocol field numerically (`1` for UDP and `2` for TCP).
+4. POST the candidates and the stable `ConsumerSessionID` as the ICE message.
+5. Assign the opened peer path a fresh synthetic CGNAT address and relay it
+   into the long-lived virtual UDP socket.
+6. On peer failure, remove only that synthetic route and return to Freddie;
+   the Quinn endpoint and consumer session ID remain alive for server-side
+   migration initiated by the Go egress.

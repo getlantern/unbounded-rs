@@ -21,9 +21,17 @@ churn; the Rust consumer only needs Quinn's server-side migration support.
 ## Status
 
 The protocol and migration foundation is complete. The native peer-proxy path
-now includes Freddie signaling, a Pion-compatible unreliable/unordered WebRTC
+includes Freddie signaling, a Pion-compatible unreliable/unordered WebRTC
 DataChannel, the CSID-authenticated egress WebSocket, and bidirectional packet
-relay. See [`docs/wire-protocol.md`](docs/wire-protocol.md).
+relay.
+
+The censored-consumer library path now includes Freddie advertisement
+selection and offerer signaling, replaceable WebRTC sessions, Go-compatible
+ICE candidate encoding, egress packet-envelope decoding, synthetic path
+addresses, and a stable Quinn server endpoint. `maintain_consumer` re-pairs
+after peer churn while preserving the virtual UDP socket and consumer session
+ID that identify the existing QUIC connection. See
+[`docs/wire-protocol.md`](docs/wire-protocol.md).
 
 ```sh
 cargo test
@@ -68,6 +76,38 @@ lantern-unbounded = { version = "0.1", default-features = false }
 
 The default `native-client` feature retains the standalone `peer-proxy` binary
 and the `FreddieClient` implementation used by the command above.
+
+## Censored-consumer embedding
+
+`ConsumerConfig::new` accepts an object-safe `ConsumerSignaler`, the stable
+`VirtualUdpSocket`, a `SyntheticPathAllocator`, and a caller-owned consumer
+session ID. `FreddieClient` implements both the peer-proxy `Signaler` and the
+consumer advertisement interface; Spark can provide the same interfaces from
+its existing HTTP stack with default features disabled.
+
+`ConsumerQuicServer` runs Quinn over that virtual socket and applies the Go
+transport contract: 131072 incoming streams in each direction, a 60-second
+idle timeout, and a 15-second keepalive. Quinn sends conservative 1200-byte
+packets; the virtual path accepts up to 1452 bytes so the infrastructure Go
+egress's 1280-byte initial packets and path-MTU probes are not discarded. The
+supplied Quinn TLS configuration must advertise the `broflake` ALPN value
+exposed as `CONSUMER_QUIC_ALPN`.
+
+`ConsumerQuicBroker` owns the long-lived accept loop. Its cloneable
+`ConsumerQuicDialer` waits for the current or next infrastructure-owned QUIC
+client and opens a bidirectional stream, so an embedding proxy does not need to
+own connection churn or path migration. Both the broker and pending stream
+opens are cancellation-aware. A closed infrastructure connection clears the
+current state, and later stream opens wait for its replacement.
+
+`ConsumerQuicDialer::connect_socks5` adds the target-routing handshake used by
+the Go consumer and egress. It supports IPv4, IPv6, and domain targets, fully
+consumes the server's variable-length bound-address response, and returns the
+same stream ready for transparent application bytes.
+
+The remaining integration work is production STUN cohort sourcing/rotation,
+Spark transport wiring, and live validation of the Rust consumer against the
+deployed Go Freddie, peer proxy, and egress.
 
 DTLS ClientHello randomization is enabled by default. Cipher suites and
 extensions retain their negotiated contents but are independently reordered on
