@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lantern_unbounded::{
-    ConsumerQuicBroker, ConsumerQuicError, ConsumerQuicServer, ConsumerQuicStream, VirtualPath,
-    VirtualUdpSocket,
+    ConsumerQuicBroker, ConsumerQuicError, ConsumerQuicServer, ConsumerQuicStream,
+    ConsumerSocks5Error, Socks5Target, VirtualPath, VirtualUdpSocket,
 };
 use quinn::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use quinn::{
@@ -185,6 +185,29 @@ async fn quic_dial_wait_is_cancellable_before_egress_connects() {
     assert!(matches!(
         dialer.open_bi(&dial_cancellation).await,
         Err(ConsumerQuicError::Cancelled)
+    ));
+    broker_cancellation.cancel();
+    broker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn socks5_connect_reports_precancellation_as_cancelled() {
+    let (server_config, _) = endpoint_configs();
+    let server = Arc::new(
+        ConsumerQuicServer::new(VirtualUdpSocket::new(addr(1, 7000)), server_config).unwrap(),
+    );
+    let broker = ConsumerQuicBroker::new(server);
+    let dialer = broker.dialer();
+    let broker_cancellation = CancellationToken::new();
+    let broker_task = tokio::spawn(broker.run(broker_cancellation.clone()));
+    let dial_cancellation = CancellationToken::new();
+    dial_cancellation.cancel();
+
+    // A pre-open cancellation must be reported as Cancelled, not Quic(Cancelled).
+    let target = Socks5Target::Ip(addr(9, 443));
+    assert!(matches!(
+        dialer.connect_socks5(&target, &dial_cancellation).await,
+        Err(ConsumerSocks5Error::Cancelled)
     ));
     broker_cancellation.cancel();
     broker_task.await.unwrap().unwrap();

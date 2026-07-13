@@ -116,7 +116,15 @@ impl ConsumerQuicDialer {
         target: &Socks5Target,
         cancellation: &CancellationToken,
     ) -> Result<ConsumerQuicStream, ConsumerSocks5Error> {
-        let stream = self.open_bi(cancellation).await?;
+        let stream = match self.open_bi(cancellation).await {
+            Ok(stream) => stream,
+            // A cancellation that lands before the stream opens must surface as the same
+            // Cancelled variant the handshake select uses below; otherwise callers that
+            // distinguish cancellation from failure (e.g. supervisors) would have to match
+            // both Cancelled and Quic(Cancelled) and would miscount the pre-open case.
+            Err(ConsumerQuicError::Cancelled) => return Err(ConsumerSocks5Error::Cancelled),
+            Err(error) => return Err(ConsumerSocks5Error::Quic(error)),
+        };
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(ConsumerSocks5Error::Cancelled),

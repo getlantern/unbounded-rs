@@ -25,12 +25,12 @@ the open stream resumed over peer B within the existing QUIC idle timeout.
 
 On 2026-07-12 the inverse mixed-language path also completed: the Spark Rust
 consumer and two successive Rust peers used a local Go Freddie and the deployed
-Go egress at `wss://unbounded.iantem.io/ws`. Peer A was stopped after 2.9 MB of
-a 20 MB HTTP response. The consumer advertised a replacement path, peer B
-attached with the same consumer session ID, and the original QUIC stream
-resumed without an application reconnect. The request finished with HTTP 200,
-20,001,492 wire bytes, two consumer attempts, one completed path, and zero
-failed attempts.
+Go egress at `wss://unbounded.iantem.io/ws`. Peer A was stopped after roughly
+2.9 MB (decimal) of an approximately 20 MB (decimal) HTTP response. The consumer
+advertised a replacement path, peer B attached with the same consumer session
+ID, and the original QUIC stream resumed without an application reconnect. The
+request finished with HTTP 200, 20,001,492 total bytes received on the wire, two
+consumer attempts, one completed path, and zero failed attempts.
 
 ## Compatibility details found live
 
