@@ -36,7 +36,7 @@ pub enum ConsumerQuicError {
     Endpoint(#[from] io::Error),
     #[error("consumer QUIC endpoint is closed")]
     Closed,
-    #[error("consumer QUIC accept was cancelled")]
+    #[error("consumer QUIC operation was cancelled")]
     Cancelled,
     #[error("consumer QUIC handshake failed: {0}")]
     Handshake(#[from] quinn::ConnectionError),
