@@ -17,7 +17,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::egress::{EgressError, EgressTunnel};
-use crate::protocol::{GenesisMessage, PathAssertion, SignalMessageType};
+use crate::protocol::{is_subprotocol_token, GenesisMessage, PathAssertion, SignalMessageType};
 use crate::relay::{relay, RelayEnd, RelayError};
 use crate::rtc::{build_api_with_options, WebRtcDatagrams, DATA_CHANNEL_LABEL};
 use crate::signaling::{Signaler, SignalingError};
@@ -64,6 +64,8 @@ pub enum PeerProxyError {
     },
     #[error("consumer supplied no session ID")]
     MissingConsumerSessionId,
+    #[error("consumer supplied a malformed session ID")]
+    InvalidConsumerSessionId,
     #[error("consumer supplied an invalid ICE candidate: {0}")]
     InvalidIceCandidate(#[source] webrtc::Error),
     #[error("timed out waiting for the consumer WebRTC DataChannel")]
@@ -182,17 +184,22 @@ pub async fn run_peer_proxy_until_cancelled(
     let session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Guards emitting exactly one `PeerDisconnected` per connected session.
     let disconnect_emitted = Arc::new(AtomicBool::new(false));
+    // Only emit `PeerDisconnected` for a session that actually reached `Connected`,
+    // so a session that fails straight to Failed/Closed emits nothing.
+    let connect_emitted = Arc::new(AtomicBool::new(false));
 
     let state_connection = connection.clone();
     let state_events = events.clone();
     let state_session_id = session_id.clone();
     let state_disconnect_emitted = disconnect_emitted.clone();
+    let state_connect_emitted = connect_emitted.clone();
     connection.on_peer_connection_state_change(Box::new(move |state| {
         fail_data_channel_wait(state, &state_data_channel_tx);
         let connection = state_connection.clone();
         let events = state_events.clone();
         let session_id = state_session_id.clone();
         let disconnect_emitted = state_disconnect_emitted.clone();
+        let connect_emitted = state_connect_emitted.clone();
         Box::pin(async move {
             let Some(events) = events else {
                 return;
@@ -212,13 +219,16 @@ pub async fn run_peer_proxy_until_cancelled(
             };
             match state {
                 RTCPeerConnectionState::Connected => {
+                    connect_emitted.store(true, Ordering::SeqCst);
                     let selected_pair = selected_candidate_pair(&connection).await;
                     let _ = events.send(peer_connected_event(session_id, selected_pair.as_ref()));
                 }
-                // Only the first terminal transition emits a disconnect, so a
-                // Disconnected → Failed → Closed sequence yields one event.
+                // Emit a disconnect only for a session that reached Connected, and
+                // only on the first terminal transition (Disconnected → Failed →
+                // Closed yields one event).
                 state
                     if is_disconnect_state(state)
+                        && connect_emitted.load(Ordering::SeqCst)
                         && !disconnect_emitted.swap(true, Ordering::SeqCst) =>
                 {
                     let _ = events.send(peer_disconnected_event(session_id));
@@ -292,6 +302,13 @@ pub async fn run_peer_proxy_until_cancelled(
                 })?;
         if ice.consumer_session_id.is_empty() {
             return Err(PeerProxyError::MissingConsumerSessionId);
+        }
+        // The session ID is peer-supplied and flows into emitted peer-state events
+        // (and is logged by bin/peer-proxy). Reject anything that isn't a clean
+        // subprotocol token before it can be published, to prevent log/telemetry
+        // injection via commas, whitespace, or control bytes.
+        if !is_subprotocol_token(&ice.consumer_session_id) {
+            return Err(PeerProxyError::InvalidConsumerSessionId);
         }
         // Publish the session ID before adding candidates so the peer-connection
         // state-change handler can label its events once ICE completes.
