@@ -197,8 +197,18 @@ pub async fn run_peer_proxy_until_cancelled(
             let Some(events) = events else {
                 return;
             };
-            let Some(session_id) = session_id.lock().unwrap().clone() else {
-                return;
+            // Convention: no unwrap() outside tests. A poisoned lock (only if a
+            // holder panicked) is treated like "id not yet known" — skip the event.
+            // The guard is scoped to this block so it is dropped before the await
+            // below — a MutexGuard is !Send and must not live across an await point.
+            let session_id = {
+                let Ok(guard) = session_id.lock() else {
+                    return;
+                };
+                let Some(id) = guard.clone() else {
+                    return;
+                };
+                id
             };
             match state {
                 RTCPeerConnectionState::Connected => {
