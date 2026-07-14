@@ -104,15 +104,35 @@ pub async fn supervise_peer_proxy_pool(
         let events = events.clone();
         async move {
             let (worker_events_tx, mut worker_events_rx) = mpsc::unbounded_channel();
-            let forwarder = tokio::spawn(async move {
-                while let Some(event) = worker_events_rx.recv().await {
-                    if let Some(events) = &events {
-                        let _ = events.send(PoolEvent { slot, event });
+            let mut supervise = std::pin::pin!(supervise_peer_proxy(
+                config,
+                cancellation,
+                Some(worker_events_tx)
+            ));
+            // Forward inline and terminate when the supervised session finishes —
+            // not when the channel closes. A session's WebRTC state-change callback
+            // can outlive the session while still holding a clone of the event
+            // sender; waiting for that clone to drop would hang shutdown. The final
+            // `Stopped` event is enqueued before `supervise_peer_proxy` returns, so
+            // draining once it completes forwards every event without loss.
+            let summary = loop {
+                tokio::select! {
+                    biased;
+                    summary = &mut supervise => {
+                        while let Ok(event) = worker_events_rx.try_recv() {
+                            if let Some(events) = &events {
+                                let _ = events.send(PoolEvent { slot, event });
+                            }
+                        }
+                        break summary;
+                    }
+                    Some(event) = worker_events_rx.recv() => {
+                        if let Some(events) = &events {
+                            let _ = events.send(PoolEvent { slot, event });
+                        }
                     }
                 }
-            });
-            let summary = supervise_peer_proxy(config, cancellation, Some(worker_events_tx)).await;
-            let _ = forwarder.await;
+            };
             (slot, summary)
         }
     });
@@ -409,6 +429,55 @@ mod tests {
             }
         }
         assert!(second_retry.unwrap() <= Duration::from_millis(12));
+    }
+
+    #[tokio::test]
+    async fn pool_shuts_down_when_a_session_registers_a_state_callback() {
+        // Regression: `run_peer_proxy_until_cancelled` registers an
+        // `on_peer_connection_state_change` callback that captures a clone of the
+        // per-session `SupervisorEvent` sender (and, before the fix, a strong
+        // `Arc` back to the connection). WebRTC keeps that callback alive past the
+        // session, so the sender clone outlived the session and kept the worker's
+        // forwarder channel open — the pool future never completed after
+        // cancellation and `SharingHandle::stop` hung. The pool must shut down
+        // regardless of a leaked event-sender clone.
+        let cancellation = CancellationToken::new();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel::<PoolEvent>();
+        let mut config = test_config();
+        // Park in backoff after the first failure so cancellation, not the retry
+        // cadence, drives shutdown.
+        config.initial_backoff = Duration::from_secs(30);
+        config.max_backoff = Duration::from_secs(30);
+
+        let pool = tokio::spawn(supervise_peer_proxy_pool(
+            config,
+            1,
+            cancellation.clone(),
+            Some(events_tx),
+        ));
+
+        // Wait until the real peer proxy has attempted and failed — this proves it
+        // built the RTCPeerConnection and registered the state-change callback.
+        let mut saw_failure = false;
+        while let Some(PoolEvent { event, .. }) =
+            tokio::time::timeout(Duration::from_secs(5), events_rx.recv())
+                .await
+                .expect("expected peer-proxy events before timeout")
+        {
+            if matches!(event, SupervisorEvent::AttemptFailed { .. }) {
+                saw_failure = true;
+                break;
+            }
+        }
+        assert!(saw_failure, "peer proxy should have attempted and failed");
+
+        cancellation.cancel();
+        let summary = tokio::time::timeout(Duration::from_secs(5), pool)
+            .await
+            .expect("pool did not shut down within 5s of cancellation")
+            .expect("pool task panicked");
+        assert_eq!(summary.workers.len(), 1);
+        assert!(summary.attempts() >= 1);
     }
 
     #[test]

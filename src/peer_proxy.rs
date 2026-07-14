@@ -188,7 +188,11 @@ pub async fn run_peer_proxy_until_cancelled(
     // so a session that fails straight to Failed/Closed emits nothing.
     let connect_emitted = Arc::new(AtomicBool::new(false));
 
-    let state_connection = connection.clone();
+    // Hold a `Weak` here, not a strong `Arc`: a strong clone captured by the
+    // state-change callback (which the connection itself owns) forms a reference
+    // cycle that leaks the whole `RTCPeerConnection` — and keeps the `events`
+    // sender clone below alive — for every session, hanging pool shutdown.
+    let state_connection = Arc::downgrade(&connection);
     let state_events = events.clone();
     let state_session_id = session_id.clone();
     let state_disconnect_emitted = disconnect_emitted.clone();
@@ -220,7 +224,12 @@ pub async fn run_peer_proxy_until_cancelled(
             match state {
                 RTCPeerConnectionState::Connected => {
                     connect_emitted.store(true, Ordering::SeqCst);
-                    let selected_pair = selected_candidate_pair(&connection).await;
+                    // The connection is normally still alive here; read the selected
+                    // pair when it is, otherwise fall back to `None` (remote unknown).
+                    let selected_pair = match connection.upgrade() {
+                        Some(connection) => selected_candidate_pair(&connection).await,
+                        None => None,
+                    };
                     let _ = events.send(peer_connected_event(session_id, selected_pair.as_ref()));
                 }
                 // Emit a disconnect only for a session that reached Connected, and
